@@ -21,7 +21,7 @@ class PokerVisionApp:
         capture: ScreenCapture = None,
         use_overlay: bool = True,
         use_debug: bool = False,
-        capture_interval: float = 1.0,
+        capture_interval: float = 0.25,
         confidence_threshold: float = 0.7,
         mock_mode: bool = False,
         fast_cards: bool = False,
@@ -366,7 +366,12 @@ def main():
     parser.add_argument("--mock", action="store_true", help="Use mock capture for testing")
     parser.add_argument("--fullscreen", action="store_true", help="Capture full screen")
     parser.add_argument("--select", action="store_true", help="Interactively select window to capture")
-    parser.add_argument("--interval", type=float, default=1.0, help="Capture interval")
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.25,
+        help="Capture interval in seconds (default: 0.25 for faster hole recognition)",
+    )
     parser.add_argument("--sims", type=int, default=500, help="Monte Carlo simulations")
     parser.add_argument(
         "--villain-range",

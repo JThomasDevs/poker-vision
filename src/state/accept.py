@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 from .types import (
     BOARD_MIN_MARGIN,
@@ -13,6 +13,9 @@ from .types import (
     HOLE_MIN_STABLE_FRAMES,
     HOLE_MIN_TEMPORAL,
     HOLE_MIN_TOP,
+    HOLE_STRONG_MARGIN,
+    HOLE_STRONG_STABLE_FRAMES,
+    HOLE_STRONG_TOP,
     SLOT_BOARD,
     SLOT_HERO,
     UNKNOWN,
@@ -23,35 +26,51 @@ from .types import (
 )
 
 
-def _thresholds_for(
+def _is_hole(
     obs: CardObservation,
     hole_slots: Sequence[str],
     board_slots: Sequence[str],
-) -> Tuple[float, float, float, int]:
-    """Return (min_top, min_margin, min_temporal, min_stable_frames)."""
-    if obs.slot_id in hole_slots:
-        return HOLE_MIN_TOP, HOLE_MIN_MARGIN, HOLE_MIN_TEMPORAL, HOLE_MIN_STABLE_FRAMES
-    if obs.slot_id in board_slots:
-        return BOARD_MIN_TOP, BOARD_MIN_MARGIN, BOARD_MIN_TEMPORAL, BOARD_MIN_STABLE_FRAMES
-    if obs.hole_mode:
-        return HOLE_MIN_TOP, HOLE_MIN_MARGIN, HOLE_MIN_TEMPORAL, HOLE_MIN_STABLE_FRAMES
-    return BOARD_MIN_TOP, BOARD_MIN_MARGIN, BOARD_MIN_TEMPORAL, BOARD_MIN_STABLE_FRAMES
-
-
-def _passes_local_gate(
-    obs: CardObservation,
-    min_top: float,
-    min_margin: float,
-    min_temporal: float,
-    min_stable: int,
 ) -> bool:
+    if obs.slot_id in hole_slots:
+        return True
+    if obs.slot_id in board_slots:
+        return False
+    return bool(obs.hole_mode)
+
+
+def _passes_board_gate(obs: CardObservation) -> bool:
     return (
-        obs.confidence >= min_top
-        and obs.rank_margin >= min_margin
-        and obs.stable_frames >= min_stable
-        and obs.temporal_agreement >= min_temporal
+        obs.confidence >= BOARD_MIN_TOP
+        and obs.rank_margin >= BOARD_MIN_MARGIN
+        and obs.stable_frames >= BOARD_MIN_STABLE_FRAMES
+        and obs.temporal_agreement >= BOARD_MIN_TEMPORAL
         and obs.box_stable
     )
+
+
+def _passes_hole_gate(obs: CardObservation) -> bool:
+    """Adaptive hole acceptance: strong → frame 1; moderate → 2 + temporal."""
+    if not obs.box_stable:
+        return False
+
+    # STRONG: high conf + high margin → accept on first quality frame.
+    if (
+        obs.confidence >= HOLE_STRONG_TOP
+        and obs.rank_margin >= HOLE_STRONG_MARGIN
+        and obs.stable_frames >= HOLE_STRONG_STABLE_FRAMES
+    ):
+        return True
+
+    # MODERATE: baseline thresholds need two confirming frames + temporal.
+    if (
+        obs.confidence >= HOLE_MIN_TOP
+        and obs.rank_margin >= HOLE_MIN_MARGIN
+        and obs.stable_frames >= HOLE_MIN_STABLE_FRAMES
+        and obs.temporal_agreement >= HOLE_MIN_TEMPORAL
+    ):
+        return True
+
+    return False
 
 
 def _demote(obs: CardObservation) -> None:
@@ -73,17 +92,18 @@ def accept_table(
 ) -> List[CardObservation]:
     """Apply local VISIBLE gates then enforce unique labels across the table.
 
-    Local gate (hole vs board thresholds from types.py):
-      top confidence, rank margin, stable_frames, temporal_agreement, box_stable.
-    Failures become UNKNOWN / ??. Among local passers, duplicate labels keep the
-    higher-confidence observation and demote the rest.
+    Hole cards use adaptive gates (strong → 1 frame, moderate → 2 + temporal).
+    Board keeps first-frame acceptance. Failures become UNKNOWN / ??.
+    Among local passers, duplicate labels keep the higher-confidence observation
+    and demote the rest.
     """
     passed: List[CardObservation] = []
     for o in obs:
-        min_top, min_margin, min_temporal, min_stable = _thresholds_for(
-            o, hole_slots, board_slots
-        )
-        if _passes_local_gate(o, min_top, min_margin, min_temporal, min_stable):
+        if _is_hole(o, hole_slots, board_slots):
+            ok = _passes_hole_gate(o)
+        else:
+            ok = _passes_board_gate(o)
+        if ok:
             _promote(o)
             passed.append(o)
         else:

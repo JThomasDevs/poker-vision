@@ -34,8 +34,9 @@ from src.detection.blobs import find_card_blobs
 from src.detection.cards import DetectedCard
 from src.state.accept import accept_table
 from src.state.table import TableState, build_table_state
-from src.state.tracker import CardTracker
+from src.state.tracker import CardTracker, box_iou
 from src.state.types import (
+    BOX_STABLE_IOU,
     SLOT_BOARD,
     SLOT_HERO,
     VISIBLE,
@@ -43,6 +44,11 @@ from src.state.types import (
 )
 
 Box = Tuple[int, int, int, int]
+
+# Hero ROI steady-state: reuse cached hole boxes when blob find flickers.
+HERO_ROI_READY_FRAMES = 2
+HERO_ROI_IOU_MIN = BOX_STABLE_IOU
+HERO_ROI_MISS_LIMIT = 3
 
 try:
     from src.detection.layout import (
@@ -235,10 +241,63 @@ class FastCardsPipeline:
         ] = None
         self._cached_result: Optional[FastCardsResult] = None
         self.last_classify_ran: bool = False
+        # Steady-state hero ROIs: classify holes from cache when blobs miss.
+        self._hero_rois: Optional[List[Box]] = None
+        self._hero_roi_stable_count: int = 0
+        self._hero_roi_miss_count: int = 0
+
+    def _invalidate_hero_rois(self) -> None:
+        self._hero_rois = None
+        self._hero_roi_stable_count = 0
+        self._hero_roi_miss_count = 0
+
+    def _resolve_hero_rois(self, detected_hero: Sequence[Box]) -> List[Box]:
+        """Board always from blobs; holes from cache when established + stable.
+
+        Update cache when two hero boxes are found with good IoU to previous.
+        Reuse cache on transient blob misses; invalidate on IoU collapse or
+        sustained absence.
+        """
+        detected = sorted(detected_hero, key=lambda b: b[0])[:2]
+
+        if len(detected) == 2:
+            if self._hero_rois is not None and len(self._hero_rois) == 2:
+                iou0 = box_iou(detected[0], self._hero_rois[0])
+                iou1 = box_iou(detected[1], self._hero_rois[1])
+                if min(iou0, iou1) >= HERO_ROI_IOU_MIN:
+                    self._hero_roi_stable_count += 1
+                    self._hero_rois = list(detected)
+                    self._hero_roi_miss_count = 0
+                    return list(detected)
+                # Geometry changed (new hand / seat move) — reset to fresh boxes.
+                self._hero_rois = list(detected)
+                self._hero_roi_stable_count = 1
+                self._hero_roi_miss_count = 0
+                return list(detected)
+            self._hero_rois = list(detected)
+            self._hero_roi_stable_count = 1
+            self._hero_roi_miss_count = 0
+            return list(detected)
+
+        # Fewer than 2 hole blobs this frame.
+        self._hero_roi_miss_count += 1
+        if self._hero_roi_miss_count >= HERO_ROI_MISS_LIMIT:
+            self._invalidate_hero_rois()
+            return list(detected)
+
+        if (
+            self._hero_rois is not None
+            and len(self._hero_rois) == 2
+            and self._hero_roi_stable_count >= HERO_ROI_READY_FRAMES
+        ):
+            return list(self._hero_rois)
+
+        return list(detected)
 
     def process(self, frame_bgr: np.ndarray) -> FastCardsResult:
         if frame_bgr is None or frame_bgr.size == 0:
             self.last_classify_ran = False
+            self._invalidate_hero_rois()
             return FastCardsResult(layout_backend=self.layout_backend)
 
         raw_boxes = find_card_blobs(frame_bgr)
@@ -250,6 +309,7 @@ class FastCardsPipeline:
             boxes, frame_bgr.shape
         )
         hero_boxes = select_hero_hole_pair(hole_boxes, frame_bgr)
+        hero_boxes = self._resolve_hero_rois(hero_boxes)
 
         if self.use_tracker and self.tracker is not None:
             return self._process_tracked(

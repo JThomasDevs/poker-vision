@@ -192,3 +192,27 @@ def test_apply_tracker_dets_omits_unknown_from_equity_lists():
     assert table.state_valid is False
     assert community == []
     assert holes == []
+
+
+def test_hero_roi_cache_reuses_on_transient_miss():
+    """After N stable hero frames, missing blobs still return cached ROIs."""
+    from src.detection.pipeline import HERO_ROI_MISS_LIMIT, HERO_ROI_READY_FRAMES
+
+    pipe = object.__new__(FastCardsPipeline)
+    pipe._hero_rois = None
+    pipe._hero_roi_stable_count = 0
+    pipe._hero_roi_miss_count = 0
+
+    h0 = (80, 200, 120, 260)
+    h1 = (130, 200, 170, 260)
+    for _ in range(HERO_ROI_READY_FRAMES):
+        out = pipe._resolve_hero_rois([h0, h1])
+        assert out == [h0, h1]
+
+    assert pipe._hero_roi_stable_count >= HERO_ROI_READY_FRAMES
+    reused = pipe._resolve_hero_rois([])
+    assert reused == [h0, h1]
+
+    for _ in range(HERO_ROI_MISS_LIMIT):
+        pipe._resolve_hero_rois([])
+    assert pipe._hero_rois is None

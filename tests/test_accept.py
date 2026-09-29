@@ -9,6 +9,8 @@ from src.state.accept import accept_table
 from src.state.types import (
     BOARD_MIN_STABLE_FRAMES,
     HOLE_MIN_STABLE_FRAMES,
+    HOLE_STRONG_MARGIN,
+    HOLE_STRONG_TOP,
     UNKNOWN,
     UNKNOWN_LABEL,
     VISIBLE,
@@ -73,19 +75,73 @@ def test_board_accepts_clear_high_conf_card():
     assert out[0].label == "As"
 
 
-def test_hole_rejects_single_frame_flip():
-    """Low stable_frames / low temporal → not VISIBLE for hole cards."""
+def test_strong_hole_accepts_on_first_frame():
+    """High conf + high margin + box_stable → VISIBLE at stable_frames=1."""
     hole = _obs(
         "hero_0",
         "K",
         "h",
-        confidence=0.85,
-        rank_margin=0.40,
-        stable_frames=1,  # below HOLE_MIN_STABLE_FRAMES (3)
-        temporal_agreement=0.20,  # below HOLE_MIN_TEMPORAL (0.65)
+        confidence=max(HOLE_STRONG_TOP, 0.85),
+        rank_margin=max(HOLE_STRONG_MARGIN, 0.40),
+        stable_frames=1,
+        temporal_agreement=1.0,
         hole_mode=True,
     )
-    assert hole.stable_frames < HOLE_MIN_STABLE_FRAMES
+    out = accept_table([hole])
+    assert out[0].visibility == VISIBLE
+    assert out[0].label == "Kh"
+
+
+def test_moderate_hole_needs_two_frames():
+    """Moderate conf/margin: frame 1 rejected; frame 2 + temporal accepted."""
+    # Above HOLE_MIN_* but below STRONG thresholds.
+    conf = 0.35
+    margin = 0.15
+    assert conf < HOLE_STRONG_TOP
+    assert margin < HOLE_STRONG_MARGIN
+
+    weak_frame = _obs(
+        "hero_0",
+        "Q",
+        "d",
+        confidence=conf,
+        rank_margin=margin,
+        stable_frames=1,
+        temporal_agreement=0.80,
+        hole_mode=True,
+    )
+    out1 = accept_table([weak_frame])
+    assert out1[0].visibility == UNKNOWN
+    assert out1[0].label == UNKNOWN_LABEL
+
+    moderate = _obs(
+        "hero_0",
+        "Q",
+        "d",
+        confidence=conf,
+        rank_margin=margin,
+        stable_frames=HOLE_MIN_STABLE_FRAMES,
+        temporal_agreement=0.80,
+        hole_mode=True,
+    )
+    assert HOLE_MIN_STABLE_FRAMES == 2
+    out2 = accept_table([moderate])
+    assert out2[0].visibility == VISIBLE
+    assert out2[0].label == "Qd"
+
+
+def test_weak_hole_stays_unknown():
+    """Below moderate floors → UNKNOWN even with many stable frames."""
+    hole = _obs(
+        "hero_0",
+        "J",
+        "c",
+        confidence=0.10,
+        rank_margin=0.02,
+        stable_frames=5,
+        temporal_agreement=0.90,
+        hole_mode=True,
+    )
     out = accept_table([hole])
     assert out[0].visibility == UNKNOWN
     assert out[0].label == UNKNOWN_LABEL

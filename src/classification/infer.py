@@ -321,57 +321,24 @@ def predict_hole_card_dist(
     *,
     ul_bgr: Optional[np.ndarray] = None,
 ) -> ClassifierDist:
-    """Hole-card distributions with avatar-dim restore (same blends as predict_hole_card)."""
+    """Hole-card distributions: cheap full+UL first, then avatar/CLAHE if weak.
+
+    Strong cheap results (high top conf + rank margin) skip the enhanced path.
+    """
     from src.detection.layout import (
         avatar_contaminated,
         hole_index_crop,
         mask_circular_avatar,
         ul_crop,
     )
+    from src.state.types import HOLE_STRONG_MARGIN, HOLE_STRONG_TOP
 
     index = ul_bgr if ul_bgr is not None else hole_index_crop(full_bgr)
-    contaminated = avatar_contaminated(full_bgr)
-
-    if contaminated:
-        restored = _clahe_bgr(full_bgr, clip=2.0)
-        idx = hole_index_crop(restored, frac_h=0.42, frac_w=0.50)
-        pip = _suit_pip_crop(restored)
-        rp_f, sp_f = _bgr_to_probs(restored, model, meta, device)
-        rp_u, sp_u = _bgr_to_probs(idx, model, meta, device)
-        rp_p, sp_p = _bgr_to_probs(pip, model, meta, device)
-
-        ranks = meta.get("ranks", RANKS)
-
-        rp = 0.70 * rp_f + 0.30 * rp_u
-        sp = 0.25 * sp_f + 0.25 * sp_u + 0.50 * sp_p
-
-        ri_f = int(rp_f.argmax().item())
-        ri_u = int(rp_u.argmax().item())
-        if (
-            ranks[ri_f] != ranks[ri_u]
-            and (ranks[ri_f], ranks[ri_u]) in RANK_CONFUSION_PAIRS
-            and float(rp_f[ri_f].item()) >= 0.30
-        ):
-            rp = rp_f
-
-        dist = _tensor_probs_to_dist(rp, sp, meta)
-        if dist.top_conf() >= 0.12:
-            return dist
-
-        masked = mask_circular_avatar(full_bgr)
-        return predict_full_and_ul_dist(
-            masked,
-            index if index is not None and index.size else hole_index_crop(masked),
-            model,
-            meta,
-            device,
-            full_rank_weight=0.15,
-            full_prefer_conf=1.01,
-        )
-
     if index is None or index.size == 0:
         index = ul_crop(full_bgr, 0.50)
-    return predict_full_and_ul_dist(
+
+    # Cheap path first: full + UL blend without CLAHE / avatar / pip stack.
+    cheap = predict_full_and_ul_dist(
         full_bgr,
         index,
         model,
@@ -379,6 +346,51 @@ def predict_hole_card_dist(
         device,
         full_rank_weight=0.55,
         full_prefer_conf=0.35,
+    )
+    if (
+        cheap.top_conf() >= HOLE_STRONG_TOP
+        and cheap.rank_margin() >= HOLE_STRONG_MARGIN
+    ):
+        return cheap
+
+    contaminated = avatar_contaminated(full_bgr)
+    if not contaminated:
+        return cheap
+
+    restored = _clahe_bgr(full_bgr, clip=2.0)
+    idx = hole_index_crop(restored, frac_h=0.42, frac_w=0.50)
+    pip = _suit_pip_crop(restored)
+    rp_f, sp_f = _bgr_to_probs(restored, model, meta, device)
+    rp_u, sp_u = _bgr_to_probs(idx, model, meta, device)
+    rp_p, sp_p = _bgr_to_probs(pip, model, meta, device)
+
+    ranks = meta.get("ranks", RANKS)
+
+    rp = 0.70 * rp_f + 0.30 * rp_u
+    sp = 0.25 * sp_f + 0.25 * sp_u + 0.50 * sp_p
+
+    ri_f = int(rp_f.argmax().item())
+    ri_u = int(rp_u.argmax().item())
+    if (
+        ranks[ri_f] != ranks[ri_u]
+        and (ranks[ri_f], ranks[ri_u]) in RANK_CONFUSION_PAIRS
+        and float(rp_f[ri_f].item()) >= 0.30
+    ):
+        rp = rp_f
+
+    dist = _tensor_probs_to_dist(rp, sp, meta)
+    if dist.top_conf() >= 0.12:
+        return dist
+
+    masked = mask_circular_avatar(full_bgr)
+    return predict_full_and_ul_dist(
+        masked,
+        index if index is not None and index.size else hole_index_crop(masked),
+        model,
+        meta,
+        device,
+        full_rank_weight=0.15,
+        full_prefer_conf=1.01,
     )
 
 

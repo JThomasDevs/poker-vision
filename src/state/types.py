@@ -37,7 +37,13 @@ BOARD_MIN_STABLE_FRAMES = 1
 HOLE_MIN_TOP = 0.28
 HOLE_MIN_MARGIN = 0.10
 HOLE_MIN_TEMPORAL = 0.65
-HOLE_MIN_STABLE_FRAMES = 3
+# Moderate hole path: two confirming frames (was a rigid 3 for all holes).
+HOLE_MIN_STABLE_FRAMES = 2
+
+# Strong hole path: accept on first quality frame when clearly peaked.
+HOLE_STRONG_TOP = 0.55
+HOLE_STRONG_MARGIN = 0.25
+HOLE_STRONG_STABLE_FRAMES = 1
 
 
 def normalize_probs(probs: Sequence[float] | np.ndarray, n: Optional[int] = None) -> np.ndarray:

@@ -7,6 +7,9 @@ import numpy as np
 from src.state.types import (
     BOARD_MIN_STABLE_FRAMES,
     HOLE_MIN_STABLE_FRAMES,
+    HOLE_STRONG_MARGIN,
+    HOLE_STRONG_STABLE_FRAMES,
+    HOLE_STRONG_TOP,
     SLOT_BOARD,
     SLOT_HERO,
     UNKNOWN,
@@ -26,7 +29,10 @@ def test_slot_constants():
 
 def test_acceptance_stable_frame_defaults():
     assert BOARD_MIN_STABLE_FRAMES == 1
-    assert HOLE_MIN_STABLE_FRAMES == 3
+    assert HOLE_MIN_STABLE_FRAMES == 2
+    assert HOLE_STRONG_STABLE_FRAMES == 1
+    assert HOLE_STRONG_TOP > 0.28
+    assert HOLE_STRONG_MARGIN > 0.10
 
 
 def test_normalize_probs_sums_to_one():
