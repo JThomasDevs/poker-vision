@@ -1,5 +1,7 @@
 """Temporal card state: tracking, acceptance, table assembly, audit metrics."""
 
+from .accept import accept_table
+from .tracker import CardTracker
 from .types import (
     BOARD_MIN_MARGIN,
     BOARD_MIN_STABLE_FRAMES,
@@ -36,6 +38,7 @@ __all__ = [
     "BOARD_MIN_TOP",
     "BOX_STABLE_IOU",
     "CardObservation",
+    "CardTracker",
     "EMA_ALPHA",
     "HOLE_MIN_MARGIN",
     "HOLE_MIN_STABLE_FRAMES",
@@ -52,6 +55,7 @@ __all__ = [
     "UNKNOWN",
     "UNKNOWN_LABEL",
     "VISIBLE",
+    "accept_table",
     "normalize_probs",
     "rank_margin",
     "suit_margin",
