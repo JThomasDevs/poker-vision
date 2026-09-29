@@ -94,8 +94,10 @@ except ImportError:
     def select_hero_hole_pair(
         hole_boxes: Sequence[Box],
         image_bgr: Optional[np.ndarray] = None,
+        *,
+        hero_seat: Optional[str] = None,
     ) -> List[Box]:
-        del image_bgr
+        del image_bgr, hero_seat
         if not hole_boxes:
             return []
         if len(hole_boxes) <= 2:
@@ -214,6 +216,7 @@ class FastCardsPipeline:
         reuse_stable_boxes: bool = True,
         box_quant: int = 12,
         use_tracker: bool = True,
+        hero_seat: Optional[str] = None,
     ):
         ckpt = Path(checkpoint) if checkpoint else default_classifier_path()
         if not classifier_available(ckpt):
@@ -238,6 +241,8 @@ class FastCardsPipeline:
         self.reuse_stable_boxes = reuse_stable_boxes
         self.box_quant = max(1, int(box_quant))
         self.use_tracker = bool(use_tracker)
+        seat = (hero_seat or "auto").strip().lower()
+        self.hero_seat = seat if seat else "auto"
         self.tracker = CardTracker() if self.use_tracker else None
         self._cached_key: Optional[
             Tuple[Tuple[Tuple[int, int, int, int], ...], Tuple[Tuple[int, int, int, int], ...]]
@@ -316,7 +321,13 @@ class FastCardsPipeline:
         community_boxes, hole_boxes = split_community_and_holes(
             boxes, frame_bgr.shape
         )
-        hero_boxes = select_hero_hole_pair(hole_boxes, frame_bgr)
+        # Never publish a partial board (flop needs ≥3).
+        if len(community_boxes) < 3:
+            hole_boxes = list(hole_boxes) + list(community_boxes)
+            community_boxes = []
+        hero_boxes = select_hero_hole_pair(
+            hole_boxes, frame_bgr, hero_seat=self.hero_seat
+        )
         hero_boxes = self._resolve_hero_rois(hero_boxes)
 
         diag = HeroTickDiag(
@@ -643,6 +654,12 @@ def parse_args(argv=None):
         default=default_classifier_path(),
     )
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--hero-seat",
+        choices=("auto", "top", "bottom", "left", "right"),
+        default="auto",
+        help="Force hero hole seat band when auto face-up detection is ambiguous",
+    )
     return p.parse_args(argv)
 
 
@@ -656,7 +673,11 @@ def main(argv=None) -> int:
         print(f"Failed to read image: {args.image}", file=sys.stderr)
         return 1
 
-    pipe = FastCardsPipeline(checkpoint=args.checkpoint, device=args.device)
+    pipe = FastCardsPipeline(
+        checkpoint=args.checkpoint,
+        device=args.device,
+        hero_seat=args.hero_seat,
+    )
     result = pipe.process(frame)
     print(f"layout={result.layout_backend}  blobs={len(result.boxes)}")
     if result.table is not None:

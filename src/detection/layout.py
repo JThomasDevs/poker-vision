@@ -21,19 +21,26 @@ _Y_CLUSTER_GAP_FRAC = 0.75
 _Y_MIN_GAP_IMG_FRAC = 0.06
 _UPPER_BAND_FRAC = 0.55
 
-# Community row is near mid-felt; hero holes sit at bottom or side seats.
-_COMMUNITY_Y_LO = 0.15
-_COMMUNITY_Y_HI = 0.58
+# Community row is near mid-felt; hero holes sit at perimeter seats.
+# Y_LO raised so top-row hole seats (yn≈0.08–0.22) are never board candidates.
+_COMMUNITY_Y_LO = 0.28
+_COMMUNITY_Y_HI = 0.55
 _HOLE_Y_LO = 0.58
+_TOP_SEAT_Y_HI = 0.22
 # Center board strip (fractional) — extreme side seats are hole candidates.
-_BOARD_X_LO = 0.25
-_BOARD_X_HI = 0.75
+_BOARD_X_LO = 0.28
+_BOARD_X_HI = 0.72
 _MIN_FACE_UP = 0.35
 # Avatar-covered hole faces often sit ~0.05–0.28 full-box white.
 _MIN_FACE_UP_HOLE_SEAT = 0.08
 _MIN_FACE_UP_AVATAR = 0.04
 _MAX_COMMUNITY = 5
 _MAX_HOLES = 2
+# Nearby hole-card pair geometry / face-up thresholds (Stake: only hero is white).
+_PAIR_DIST_MAX = 0.14
+_FACE_UP_PAIR_MIN = 0.28
+_FACE_UP_PAIR_SUM = 0.55
+_HERO_SEATS = ("auto", "top", "bottom", "left", "right")
 
 
 def filter_card_like_boxes(
@@ -195,6 +202,9 @@ def split_community_and_holes(
         ):
             # Mis-packed side seats as "board" — treat all as hole candidates.
             community = []
+    # Never emit a partial board (flop is 3+); orphans stay hole candidates.
+    if len(community) < 3:
+        community = []
     comm_set = set(community)
     holes = _sort_lr([b for b in all_boxes if b not in comm_set])
     return community, holes
@@ -203,12 +213,17 @@ def split_community_and_holes(
 def select_hero_hole_pair(
     hole_boxes: Sequence[Box],
     image_bgr: Optional[np.ndarray] = None,
+    *,
+    hero_seat: Optional[str] = None,
 ) -> List[Box]:
     """Pick the hero's two hole cards from candidate hole boxes.
 
-    Prefers face-up (bright / white, UL-robust) cards when ``image_bgr`` is
-    given, then a nearby pair at a side/bottom hole seat. Returns at most two
-    boxes sorted left-to-right.
+    On Stake client view, only the hero shows face-up white hole cards; other
+    seats are blue backs. Prefer the brightest nearby face-up pair *anywhere*
+    on the perimeter — never hard-code bottom or mid-right.
+
+    ``hero_seat`` may force a band: ``top`` / ``bottom`` / ``left`` / ``right``
+    / ``auto`` (default). Returns at most two boxes sorted left-to-right.
     """
     if not hole_boxes:
         return []
@@ -245,76 +260,141 @@ def select_hero_hole_pair(
         return white >= need
 
     boxes = [b for b in boxes if _keep(b)]
+    boxes = _filter_boxes_by_hero_seat(boxes, img_h, img_w, hero_seat)
     if not boxes:
         return []
     if len(boxes) <= 2:
         return _sort_lr(boxes)[:_MAX_HOLES]
 
-    # Score individual boxes, then prefer a spatially close face-up pair.
+    def _dist(a: Box, b: Box) -> float:
+        if not img_w or not img_h:
+            return 0.0
+        dx = (_center_x(a) - _center_x(b)) / img_w
+        dy = (_center_y(a) - _center_y(b)) / img_h
+        return (dx * dx + dy * dy) ** 0.5
+
+    def _seat_pref(box: Box) -> float:
+        """Soft perimeter prior — never dominates a clear white face-up pair."""
+        if not img_h or not img_w:
+            return 0.5
+        cy_n = _center_y(box) / float(img_h)
+        cx_n = _center_x(box) / float(img_w)
+        if cy_n <= _TOP_SEAT_Y_HI:
+            return 0.85
+        if cy_n >= _HOLE_Y_LO:
+            return 0.70
+        if cx_n >= 0.68:
+            return 0.90
+        if cx_n <= 0.32:
+            return 0.80
+        return 0.40
+
+    # Enumerate nearby pairs; Stake hero = the only bright white face-up pair.
+    if img_w and img_h and image_bgr is not None:
+        best_face: Optional[List[Box]] = None
+        best_face_score = -1e18
+        best_any: Optional[List[Box]] = None
+        best_any_score = -1e18
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if _dist(a, b) > _PAIR_DIST_MAX:
+                    continue
+                wa, wb = _white(a), _white(b)
+                white_sum = wa + wb
+                white_min = min(wa, wb)
+                dy = abs(_center_y(a) - _center_y(b)) / img_h
+                seat = 0.5 * (_seat_pref(a) + _seat_pref(b))
+                # White dominates; soft seat prior only breaks near-ties.
+                pair_score = white_sum + 0.12 * seat - 0.10 * dy
+                if pair_score > best_any_score:
+                    best_any_score = pair_score
+                    best_any = [a, b]
+                is_face = (
+                    white_min >= _FACE_UP_PAIR_MIN or white_sum >= _FACE_UP_PAIR_SUM
+                )
+                if is_face and pair_score > best_face_score:
+                    best_face_score = pair_score
+                    best_face = [a, b]
+        if best_face is not None:
+            return _sort_lr(best_face)
+        if best_any is not None:
+            wa = _white(best_any[0])
+            wb = _white(best_any[1])
+            pair_sum = wa + wb
+            pair_min = min(wa, wb)
+            pair_set = {tuple(best_any[0]), tuple(best_any[1])}
+            best_out = max(
+                (_white(b) for b in boxes if tuple(b) not in pair_set),
+                default=0.0,
+            )
+            # Keep weakly white / avatar-dimmed hero pairs, but do not promote a
+            # face-down back pair when a brighter singleton sits elsewhere.
+            if pair_min >= 0.12:
+                return _sort_lr(best_any)
+            if pair_sum >= best_out + 0.05 and pair_min >= 0.04:
+                return _sort_lr(best_any)
+
+    # No close pair: score individuals (avatar-dimmed / sparse blobs).
     scored: List[Tuple[float, Box]] = []
     for box in boxes:
         white = _white(box)
-        cy = _center_y(box)
-        cx = _center_x(box)
-        cy_n = (cy / img_h) if img_h else 0.5
-        cx_n = (cx / img_w) if img_w else 0.5
-        if cy_n >= _HOLE_Y_LO:
-            seat = 0.55  # bottom — de-prioritize vs mid-right face-up
-        elif cx_n >= 0.68:
-            seat = 1.0  # mid-right BTN/CO (common Stake hero)
-        elif cx_n <= 0.32:
-            seat = 0.80
-        else:
-            seat = 0.25
-        # Avatar overlay on the face is a strong hero-hole signal.
+        cy_n = (_center_y(box) / img_h) if img_h else 0.5
         avatar_bonus = 0.0
         if image_bgr is not None:
             ch, cw = image_bgr.shape[:2]
             x1, y1, x2, y2 = box
             crop = image_bgr[max(0, y1) : min(ch, y2), max(0, x1) : min(cw, x2)]
             if crop.size and avatar_contaminated(crop):
-                avatar_bonus = 0.20
-        score = 0.58 * white + 0.28 * seat + 0.10 * cy_n + avatar_bonus
+                # Stake face-down backs also trip Hough (logo). Only bonus when
+                # the crop still looks like a white face under an avatar.
+                b_ch = crop[:, :, 0]
+                r_ch = crop[:, :, 2]
+                blue_back = float(np.mean(b_ch)) > float(np.mean(r_ch)) + 25
+                if not (blue_back and white < 0.28):
+                    avatar_bonus = 0.20
+        score = 0.70 * white + 0.20 * _seat_pref(box) + 0.05 * cy_n + avatar_bonus
         scored.append((score, box))
 
     scored.sort(key=lambda t: t[0], reverse=True)
-
-    # Prefer a mid-right / bottom face-up pair that sits together.
     if img_w and img_h and len(scored) >= 2:
-        def _dist(a: Box, b: Box) -> float:
-            dx = (_center_x(a) - _center_x(b)) / img_w
-            dy = (_center_y(a) - _center_y(b)) / img_h
-            return (dx * dx + dy * dy) ** 0.5
-
-        # First: best-scoring mid-right pair (Stake BTN/CO hero).
-        right = [
-            (s, b)
-            for s, b in scored
-            if (_center_x(b) / img_w) >= 0.68
-        ]
-        best_pair: Optional[List[Box]] = None
-        best_pair_score = -1e18
-        for i in range(len(right)):
-            for j in range(i + 1, len(right)):
-                sa, a = right[i]
-                sb, b = right[j]
-                if _dist(a, b) > 0.12:
-                    continue
-                pair_score = sa + sb
-                if pair_score > best_pair_score:
-                    best_pair_score = pair_score
-                    best_pair = [a, b]
-        if best_pair is not None:
-            return _sort_lr(best_pair)
-
         best = scored[0][1]
         rest = [b for _, b in scored[1:]]
         neighbor = min(rest, key=lambda b: _dist(best, b))
-        if _dist(best, neighbor) <= 0.14:
+        if _dist(best, neighbor) <= _PAIR_DIST_MAX:
             return _sort_lr([best, neighbor])
-    # Fallback: top two by score.
     chosen = [b for _, b in scored[:_MAX_HOLES]]
     return _sort_lr(chosen)
+
+
+def _filter_boxes_by_hero_seat(
+    boxes: Sequence[Box],
+    img_h: Optional[int],
+    img_w: Optional[int],
+    hero_seat: Optional[str],
+) -> List[Box]:
+    """Keep boxes in a forced seat band; fall back to all if filter empties."""
+    if not boxes or not hero_seat or not img_h or not img_w:
+        return list(boxes)
+    seat = str(hero_seat).strip().lower()
+    if seat in ("", "auto"):
+        return list(boxes)
+    kept: List[Box] = []
+    for b in boxes:
+        cx = _center_x(b) / float(img_w)
+        cy = _center_y(b) / float(img_h)
+        ok = False
+        if seat == "top":
+            ok = cy <= 0.35
+        elif seat == "bottom":
+            ok = cy >= 0.55
+        elif seat == "left":
+            ok = cx <= 0.38
+        elif seat == "right":
+            ok = cx >= 0.62
+        if ok:
+            kept.append(b)
+    return kept if len(kept) >= 2 else list(boxes)
 
 
 def crops_from_boxes(image_bgr: np.ndarray, boxes: Sequence[Box]) -> List[np.ndarray]:
@@ -479,12 +559,15 @@ def _is_hole_seat_zone(
     img_h: Optional[int],
     img_w: Optional[int],
 ) -> bool:
-    """True for bottom hero band or far left/right seat strips (not board)."""
+    """True for perimeter hole seats (top/bottom/sides), not center board."""
     if not img_h or not img_w:
         return False
     cx = _center_x(box) / float(img_w)
     cy = _center_y(box) / float(img_h)
     if cy >= _HOLE_Y_LO:
+        return True
+    # North seats (rotated Stake view / top hero) sit above the board row.
+    if cy <= _TOP_SEAT_Y_HI:
         return True
     # Far side seats that can share the board's Y band (BTN/CO mid-right).
     if cy <= _COMMUNITY_Y_HI and (cx <= 0.24 or cx >= 0.68):

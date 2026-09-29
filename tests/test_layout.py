@@ -1,12 +1,19 @@
 """Synthetic geometry tests for detection.layout."""
 
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from src.detection.layout import (
     crops_from_boxes,
     select_hero_hole_pair,
     split_community_and_holes,
     ul_crop,
+)
+
+_EMPTY_BOARD = (
+    Path(__file__).resolve().parent / "fixtures" / "stake_preflop_empty_board_false_3d.png"
 )
 
 
@@ -41,6 +48,14 @@ def test_split_bottom_holes_with_board():
     got_c, got_h = split_community_and_holes(board + holes, shape)
     assert got_c == board
     assert got_h == holes
+
+
+def test_split_never_emits_partial_board():
+    """1–2 centered cards must not become community (false flop)."""
+    pair = [(300, 200, 360, 300), (370, 205, 430, 305)]
+    got_c, got_h = split_community_and_holes(pair, (600, 800))
+    assert got_c == []
+    assert got_h == pair
 
 
 def test_filter_keeps_avatar_dim_hole_seat():
@@ -78,6 +93,40 @@ def test_select_hero_prefers_white_face_up():
 
     pair = select_hero_hole_pair([dark, white_b, white_a], image_bgr=img)
     assert pair == [white_a, white_b]
+
+
+def test_select_hero_top_white_over_mid_right_backs():
+    """Stake bug: top-seat face-up pair must beat mid-right blue backs."""
+    img = np.zeros((600, 800, 3), dtype=np.uint8)
+    img[:, :] = (160, 90, 30)
+    # Top-center white hero (rhyzome-style)
+    top_a, top_b = (420, 20, 480, 110), (485, 22, 545, 112)
+    # Mid-right blue backs (prior hard-coded preference)
+    right_a, right_b = (560, 90, 620, 190), (625, 92, 685, 192)
+    img[20:110, 420:480] = (220, 220, 220)
+    img[22:112, 485:545] = (220, 220, 220)
+    img[90:190, 560:620] = (90, 60, 30)  # dark blue-ish back
+    img[92:192, 625:685] = (90, 60, 30)
+
+    pair = select_hero_hole_pair(
+        [right_a, right_b, top_a, top_b], image_bgr=img
+    )
+    assert pair == [top_a, top_b]
+
+
+def test_select_hero_seat_force_bottom():
+    img = np.zeros((600, 800, 3), dtype=np.uint8)
+    img[:, :] = (160, 90, 30)
+    top_a, top_b = (420, 20, 480, 110), (485, 22, 545, 112)
+    bot_a, bot_b = (350, 420, 410, 520), (420, 425, 480, 525)
+    for box in (top_a, top_b, bot_a, bot_b):
+        x1, y1, x2, y2 = box
+        img[y1:y2, x1:x2] = (220, 220, 220)
+
+    pair = select_hero_hole_pair(
+        [top_a, top_b, bot_a, bot_b], image_bgr=img, hero_seat="bottom"
+    )
+    assert pair == [bot_a, bot_b]
 
 
 def test_select_hero_left_right_order_without_image():
@@ -119,3 +168,39 @@ def test_avatar_contaminated_red_center():
 
     clean = np.full((120, 80, 3), 210, dtype=np.uint8)
     assert avatar_contaminated(clean) is False
+
+
+@pytest.mark.skipif(not _EMPTY_BOARD.is_file(), reason="empty-board fixture missing")
+def test_fixture_top_hero_empty_board_no_false_flop():
+    """Preflop top-seat Jh/Js: hero from face-up whites, community empty."""
+    import cv2
+
+    from src.detection.pipeline import FastCardsPipeline, default_classifier_path
+
+    ckpt = default_classifier_path()
+    if not ckpt.is_file() or ckpt.stat().st_size < 1000:
+        pytest.skip("classifier.pt missing")
+
+    frame = cv2.imread(str(_EMPTY_BOARD))
+    assert frame is not None
+    pipe = FastCardsPipeline(
+        checkpoint=ckpt, reuse_stable_boxes=False, use_tracker=False
+    )
+    result = pipe.process(frame)
+
+    assert result.community_labels == []
+    assert result.community_boxes == []
+    assert len(result.hole_boxes) == 2
+    # Top-center seat (not bottom Flyynikkaa / not mid-right backs)
+    for box in result.hole_boxes:
+        cx = 0.5 * (box[0] + box[2]) / frame.shape[1]
+        cy = 0.5 * (box[1] + box[3]) / frame.shape[0]
+        assert 0.45 <= cx <= 0.70
+        assert cy <= 0.20
+
+    labels = result.hole_labels
+    assert len(labels) == 2
+    assert labels[0][0] == "J" and labels[1][0] == "J"
+    # Left jack suit may be h/d ambiguity; right is spades.
+    assert labels[1][1] == "s"
+    assert labels[0][1] in ("h", "d")

@@ -36,6 +36,7 @@ class PokerVisionApp:
         debug_holes: bool = False,
         debug_holes_log: Optional[Path] = None,
         jev: bool = False,
+        hero_seat: str = "auto",
     ):
         self.capture_interval = capture_interval
         self.confidence_threshold = confidence_threshold
@@ -63,8 +64,9 @@ class PokerVisionApp:
             from src.detection.pipeline import FastCardsPipeline, default_classifier_path
 
             ckpt = default_classifier_path()
-            print(f"Card path: blobs + CNN ({ckpt.name})")
-            self.fast_pipeline = FastCardsPipeline()
+            seat = (hero_seat or os.environ.get("POKER_VISION_HERO_SEAT") or "auto")
+            print(f"Card path: blobs + CNN ({ckpt.name}), hero_seat={seat}")
+            self.fast_pipeline = FastCardsPipeline(hero_seat=seat)
             self.detector = None
             self._mock_detector = MockDetector()
         else:
@@ -495,12 +497,22 @@ def main():
             "offline stubs, gated by TableState.state_valid — not live RTA)"
         ),
     )
+    parser.add_argument(
+        "--hero-seat",
+        choices=("auto", "top", "bottom", "left", "right"),
+        default=None,
+        help=(
+            "Force hero hole seat band (default auto / POKER_VISION_HERO_SEAT). "
+            "Auto prefers the face-up white hole pair on Stake."
+        ),
+    )
 
     args = parser.parse_args()
 
     # Sensible default: use CNN when classifier.pt is present; --fast-cards forces it;
     # --yolo keeps the existing COCO YOLO / mock detector path.
     use_fast = bool(args.fast_cards) or (classifier_available() and not args.yolo)
+    hero_seat = args.hero_seat or os.environ.get("POKER_VISION_HERO_SEAT") or "auto"
 
     # Select capture source
     capture = None
@@ -530,6 +542,7 @@ def main():
         debug_holes=bool(args.debug_holes) or _env_flag("POKER_VISION_DEBUG_HOLES"),
         debug_holes_log=args.debug_holes_log,
         jev=bool(args.jev) or _env_flag("POKER_VISION_JEV"),
+        hero_seat=hero_seat,
     )
 
     app.engine.n_simulations = args.sims
