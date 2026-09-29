@@ -10,6 +10,7 @@ from src.capture.screen import ScreenCapture, select_window_interactive
 from src.detection.cards import CardDetector, DetectedCard, MockDetector
 from src.engine.evaluator import HandResult, PokerEngine
 from src.overlay.display import OverlayDisplay, SimpleConsoleDisplay, DebugDisplay
+from src.util.cards_format import format_cards_list
 
 
 class PokerVisionApp:
@@ -148,7 +149,10 @@ class PokerVisionApp:
             return None
         known = hole_strs + comm_strs
         if len(set(known)) != len(known):
-            msg = f"[skip] duplicate labels: holes={hole_strs} board={comm_strs}"
+            msg = (
+                f"[skip] duplicate labels: holes={format_cards_list(hole_strs)} "
+                f"board={format_cards_list(comm_strs)}"
+            )
             if self.use_console and hasattr(self.display, "set_status"):
                 self.display.set_status(msg)
             else:
@@ -165,7 +169,10 @@ class PokerVisionApp:
             self._last_equity_ran = True
 
         if result.recommendation == "error":
-            msg = f"[skip] eval: {result.hand_type} holes={hole_strs} board={comm_strs}"
+            msg = (
+                f"[skip] eval: {result.hand_type} holes={format_cards_list(hole_strs)} "
+                f"board={format_cards_list(comm_strs)}"
+            )
             if self.use_console and hasattr(self.display, "set_status"):
                 self.display.set_status(msg)
             else:
@@ -217,6 +224,11 @@ class PokerVisionApp:
                 )
                 h, w = frame.shape[:2] if frame is not None else (0, 0)
 
+                def _display_labs(labs: str) -> str:
+                    if not labs:
+                        return labs
+                    return format_cards_list(labs.split())
+
                 ms_equity = 0.0
 
                 if cards and len(cards) >= 2:
@@ -254,10 +266,17 @@ class PokerVisionApp:
                                   f"Win: {result.win_probability:.1%} | "
                                   f"{result.recommendation}")
                     else:
-                        wait_msg = (
-                            f"blobs={n_blobs} holes=[{hole_labs}] board=[{board_labs}] "
-                            f"- waiting for 2 hole cards"
-                        )
+                        if self.use_console:
+                            wait_msg = (
+                                f"blobs={n_blobs} holes=[{_display_labs(hole_labs)}] "
+                                f"board=[{_display_labs(board_labs)}] "
+                                f"- waiting for 2 hole cards"
+                            )
+                        else:
+                            wait_msg = (
+                                f"blobs={n_blobs} holes=[{hole_labs}] board=[{board_labs}] "
+                                f"- waiting for 2 hole cards"
+                            )
                         if self.use_console:
                             hole_list = hole_labs.split() if hole_labs else None
                             board_list = board_labs.split() if board_labs else None
@@ -270,10 +289,16 @@ class PokerVisionApp:
                             print(f"[{time.strftime('%H:%M:%S')}] "
                                   f"{w}x{h} {wait_msg}")
                 else:
-                    wait_msg = (
-                        f"blobs={n_blobs} holes=[{hole_labs or '-'}] "
-                        f"board=[{board_labs or '-'}] - no cards yet"
-                    )
+                    if self.use_console:
+                        wait_msg = (
+                            f"blobs={n_blobs} holes=[{_display_labs(hole_labs) or '-'}] "
+                            f"board=[{_display_labs(board_labs) or '-'}] - no cards yet"
+                        )
+                    else:
+                        wait_msg = (
+                            f"blobs={n_blobs} holes=[{hole_labs or '-'}] "
+                            f"board=[{board_labs or '-'}] - no cards yet"
+                        )
                     if self.use_debug:
                         self.display.update(
                             frame=frame,

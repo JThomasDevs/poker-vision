@@ -13,6 +13,8 @@ from typing import Optional
 from dataclasses import dataclass
 import numpy as np
 
+from src.util.cards_format import format_cards_list
+
 
 @dataclass
 class DisplayConfig:
@@ -91,9 +93,8 @@ class OverlayDisplay:
     ):
         """Update the overlay with new information."""
         
-        # Format cards
-        hole_str = " ".join(hole_cards) if hole_cards else "-- --"
-        comm_str = " ".join(community_cards) if community_cards else ""
+        hole_str = format_cards_list(hole_cards, empty="-- --") if hole_cards else "-- --"
+        comm_str = format_cards_list(community_cards) if community_cards else ""
         
         # Color based on recommendation
         colors = {
@@ -175,8 +176,8 @@ class SimpleConsoleDisplay:
         community_cards: list = None,
     ):
         """Redraw the full decision panel (screen clear first)."""
-        hole_str = " ".join(hole_cards) if hole_cards else "N/A"
-        board_str = " ".join(community_cards) if community_cards else "N/A"
+        hole_str = format_cards_list(hole_cards) if hole_cards else "N/A"
+        board_str = format_cards_list(community_cards) if community_cards else "N/A"
 
         sig = (hole_str, board_str, hand_type, round(win_prob, 4), recommendation)
         changed = sig != self._last_sig
@@ -206,8 +207,8 @@ class SimpleConsoleDisplay:
         message: str = "Waiting for cards...",
     ):
         """Redraw a waiting panel so the view does not scroll or stick."""
-        hole_str = " ".join(hole_cards) if hole_cards else "-- --"
-        board_str = " ".join(community_cards) if community_cards else ""
+        hole_str = format_cards_list(hole_cards, empty="-- --") if hole_cards else "-- --"
+        board_str = format_cards_list(community_cards) if community_cards else ""
 
         self._clear_screen()
         print("=" * 40)
