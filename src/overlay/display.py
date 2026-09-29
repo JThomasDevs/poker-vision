@@ -88,16 +88,12 @@ class OverlayDisplay:
         recommendation: str,
         hole_cards: list = None,
         community_cards: list = None,
-        amounts=None,
     ):
         """Update the overlay with new information."""
         
         # Format cards
         hole_str = " ".join(hole_cards) if hole_cards else "-- --"
         comm_str = " ".join(community_cards) if community_cards else ""
-        amt_line = ""
-        if amounts is not None and hasattr(amounts, "format_status"):
-            amt_line = f"\n{amounts.format_status()}"
         
         # Color based on recommendation
         colors = {
@@ -114,7 +110,7 @@ class OverlayDisplay:
 Board: {comm_str}
 
 {hand_type}
-Win: {win_prob:.1%}{amt_line}
+Win: {win_prob:.1%}
 
 >>> {recommendation.upper()} <<<"""
         
@@ -177,16 +173,12 @@ class SimpleConsoleDisplay:
         recommendation: str,
         hole_cards: list = None,
         community_cards: list = None,
-        amounts=None,
     ):
         """Redraw the full decision panel (screen clear first)."""
         hole_str = " ".join(hole_cards) if hole_cards else "N/A"
         board_str = " ".join(community_cards) if community_cards else "N/A"
-        amt_str = ""
-        if amounts is not None and hasattr(amounts, "format_status"):
-            amt_str = amounts.format_status()
 
-        sig = (hole_str, board_str, hand_type, round(win_prob, 4), recommendation, amt_str)
+        sig = (hole_str, board_str, hand_type, round(win_prob, 4), recommendation)
         changed = sig != self._last_sig
         self._last_sig = sig
 
@@ -198,8 +190,6 @@ class SimpleConsoleDisplay:
         print(f"Community:  {board_str}")
         print(f"Hand:       {hand_type}")
         print(f"Win %:      {win_prob:.1%}")
-        if amt_str:
-            print(f"Amounts:    {amt_str}")
         print(f"Action:     >>> {recommendation.upper()} <<<")
         print("=" * 40)
         if self._status:
@@ -213,15 +203,11 @@ class SimpleConsoleDisplay:
         self,
         hole_cards: list = None,
         community_cards: list = None,
-        amounts=None,
         message: str = "Waiting for cards...",
     ):
         """Redraw a waiting panel so the view does not scroll or stick."""
         hole_str = " ".join(hole_cards) if hole_cards else "-- --"
         board_str = " ".join(community_cards) if community_cards else ""
-        amt_str = ""
-        if amounts is not None and hasattr(amounts, "format_status"):
-            amt_str = amounts.format_status()
 
         self._clear_screen()
         print("=" * 40)
@@ -231,8 +217,6 @@ class SimpleConsoleDisplay:
         print(f"Community:  {board_str or 'N/A'}")
         print(f"Hand:       -")
         print(f"Win %:      -")
-        if amt_str:
-            print(f"Amounts:    {amt_str}")
         print(f"Action:     -")
         print("=" * 40)
         print(message)
@@ -265,8 +249,7 @@ class DebugDisplay:
     
     def update(self, frame: np.ndarray, cards: list, hand_type: str, 
                win_prob: float, recommendation: str,
-               hole_cards: list = None, community_cards: list = None,
-               amounts=None):
+               hole_cards: list = None, community_cards: list = None):
         """Update debug view with frame and detections."""
         if self.cv2 is None:
             return
@@ -292,13 +275,6 @@ class DebugDisplay:
             self.cv2.putText(display, label, (x1, y1 - 10),
                            self.cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-        if amounts is not None:
-            try:
-                from src.detection.table_amounts import draw_amount_rois
-                display = draw_amount_rois(display, amounts)
-            except Exception:
-                pass
-        
         # Draw recommendation overlay
         colors = {
             "raise": (0, 0, 255),         # Red
@@ -341,14 +317,7 @@ class DebugDisplay:
         # Win %
         self.cv2.putText(panel, f"Win: {win_prob:.1%}", 
                         (10, y_offset), self.cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
-        y_offset += line_height
-
-        if amounts is not None and hasattr(amounts, "format_status"):
-            self.cv2.putText(panel, amounts.format_status()[:28],
-                            (10, y_offset), self.cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 100), 1)
-            y_offset += line_height
-        
-        y_offset += line_height
+        y_offset += line_height * 2
         
         # Recommendation
         self.cv2.putText(panel, f">>> {recommendation.upper()} <<<", 

@@ -3,22 +3,14 @@ Poker hand evaluation engine using treys.
 """
 
 from treys import Evaluator, Deck as TreysDeck, Card
-from typing import List, Tuple, Optional, Sequence, TYPE_CHECKING
+from typing import List, Tuple, Optional, Sequence
 from dataclasses import dataclass
 import random
-
-if TYPE_CHECKING:
-    from src.detection.table_amounts import TableAmounts
 
 
 # Rank ints from treys: 0=2 .. 12=A
 _BROADWAY = frozenset(range(8, 13))  # T–A
 _VALID_RANGES = frozenset({"random", "strong", "default", "value", "nuts"})
-
-# Pot-odds call pricing (facing a bet). Documented thresholds for recommend().
-_CALL_MARGIN = 0.02          # prefer call when win_prob >= pot_odds + this
-_RAISE_OVER_ODDS = 0.15      # raise when win_prob >= pot_odds + this
-_RAISE_ABS_EQUITY = 0.65     # or when absolute equity is clearly high
 
 
 @dataclass
@@ -29,7 +21,6 @@ class HandResult:
     win_probability: float  # 0.0 - 1.0
     recommendation: str  # "fold", "call", "check/fold", "check/call", "bet", "raise"
     ev: float  # Expected value
-    pot_odds: Optional[float] = None  # set when facing a bet and amounts known
     
     def __str__(self):
         return f"{self.hand_type} (rank {self.hand_rank}) - {self.win_probability:.1%} win - {self.recommendation}"
@@ -38,10 +29,9 @@ class HandResult:
 class PokerEngine:
     """Evaluates poker hands and provides recommendations.
 
-    When ``TableAmounts.to_call > 0``, actions use pot-odds pricing
-    (``recommend``). Otherwise the win_prob ladder (check/fold, check/call,
-    bet, …) applies. Equity is Monte Carlo vs a villain sampling mode —
-    see ``calculate_equity`` / ``villain_range``.
+    Actions use the win_prob ladder (check/fold, check/call, bet, …).
+    Equity is Monte Carlo vs a villain sampling mode — see ``calculate_equity``
+    / ``villain_range``.
     """
     
     def __init__(self, n_simulations: int = 1000, villain_range: str = "strong"):
@@ -99,7 +89,6 @@ class PokerEngine:
         hole_cards: List[str], 
         community_cards: List[str],
         villain_range: Optional[str] = None,
-        amounts: Optional["TableAmounts"] = None,
     ) -> HandResult:
         """Evaluate a poker hand.
         
@@ -117,7 +106,6 @@ class PokerEngine:
                     the known board (≥3 cards); falls back to ``strong`` when
                     the board is incomplete. Still uses full treys evaluate
                     (kickers matter) once the board is completed in sim.
-            amounts: Optional pot / to_call / hero_stack for pot-odds pricing.
             
         Returns:
             HandResult with evaluation and recommendation
@@ -161,8 +149,7 @@ class PokerEngine:
         # Calculate win probability via Monte Carlo (recommendations use this)
         win_prob = self.calculate_equity(hand, board, villain_range=mode)
         
-        # Action: pot-odds when facing a bet; else win_prob ladder
-        recommendation, odds = self.recommend(win_prob, amounts=amounts, n_board=len(board))
+        recommendation = self.get_recommendation(win_prob, n_board=len(board))
         
         # Calculate EV (simplified)
         ev = self.calculate_ev(win_prob, recommendation)
@@ -173,7 +160,6 @@ class PokerEngine:
             win_probability=win_prob,
             recommendation=recommendation,
             ev=ev,
-            pot_odds=odds,
         )
 
     @staticmethod
@@ -385,57 +371,11 @@ class PokerEngine:
 
         return wins / trials if trials > 0 else 0.0
     
-    def recommend(
-        self,
-        win_prob: float,
-        amounts: Optional["TableAmounts"] = None,
-        n_board: int = 5,
-    ) -> Tuple[str, Optional[float]]:
-        """Choose an action from equity and optional table amounts.
-
-        Facing a bet (``to_call > 0``):
-          pot_odds = to_call / (pot + to_call)  (pot defaults to 0 if unknown)
-          call  when win_prob >= pot_odds + 0.02
-          fold  when below that
-          raise when win_prob >= pot_odds + 0.15 or win_prob >= 0.65
-          If ``to_call >= hero_stack``, treat as all-in: only call or fold
-          (no raise).
-
-        Checked to us (``to_call == 0``) or amounts unknown: win_prob ladder
-        via ``get_recommendation`` (check/fold, check/call, bet, raise, …).
-
-        Returns:
-            (action, pot_odds_or_None)
-        """
-        to_call = getattr(amounts, "to_call", None) if amounts is not None else None
-        pot = getattr(amounts, "pot", None) if amounts is not None else None
-        hero_stack = getattr(amounts, "hero_stack", None) if amounts is not None else None
-
-        if to_call is not None and to_call > 0:
-            pot_v = float(pot) if pot is not None and pot > 0 else 0.0
-            odds = to_call / (pot_v + to_call)
-            all_in = hero_stack is not None and to_call >= hero_stack * 0.99
-
-            if (
-                not all_in
-                and (
-                    win_prob >= odds + _RAISE_OVER_ODDS
-                    or win_prob >= _RAISE_ABS_EQUITY
-                )
-            ):
-                return "raise", odds
-            if win_prob >= odds + _CALL_MARGIN:
-                return "call", odds
-            return "fold", odds
-
-        # to_call == 0 (checked) or unreadable → existing equity ladder
-        return self.get_recommendation(win_prob, n_board=n_board), None
-
     def get_recommendation(self, win_prob: float, n_board: int = 5) -> str:
-        """Map equity to a coarse action when not facing a priced bet.
+        """Map equity to a coarse action from win probability.
 
-        Used when ``to_call`` is 0 or unknown. ``n_board`` softens thresholds
-        early (more board unknown → slightly more cautious).
+        ``n_board`` softens thresholds early (more board unknown → slightly
+        more cautious).
 
         Threshold bands (postflop / complete board; early streets similar):
           raise      >= raise_at (~0.70–0.75)

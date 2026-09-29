@@ -1,6 +1,6 @@
 # Poker Vision
 
-Computer vision poker assistant for Stake.us. Captures screen, detects cards, and provides hand recommendations.
+Computer vision poker assistant for Stake.us. Captures screen, detects cards, and provides hand recommendations from Monte Carlo win% (no table amount OCR).
 
 ## Quick Start
 

@@ -9,5 +9,3 @@ mss>=9.0.0
 # Dual-head card crop classifier (src/classification)
 torch>=2.0.0
 torchvision>=0.15.0
-# Optional: table pot / stack / to-call OCR (also needs Tesseract binary on PATH)
-pytesseract>=0.3.10

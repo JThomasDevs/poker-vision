@@ -33,30 +33,6 @@ pip install mss numpy opencv-python Pillow ultralytics eval7 pywin32
 python -m src.main --console
 ```
 
-## Table amounts (pot / to_call / stack)
-
-Stake shows chip amounts in **BB** (big blinds), e.g. `Pot: 8 BB`, `81 BB`,
-`222.5 BB` — not dollars. Optional OCR uses **pytesseract** plus a system
-**Tesseract** install (`table_amounts.py` also auto-detects
-`C:\Program Files\Tesseract-OCR\tesseract.exe`):
-
-```powershell
-pip install pytesseract
-# Install Tesseract OCR for Windows, then ensure `tesseract.exe` is on PATH
-# https://github.com/UB-Mannheim/tesseract/wiki
-```
-
-Without Tesseract, card detection still works; amounts stay `?` and actions
-fall back to the win% ladder (no pot-odds pricing).
-
-Debug raw OCR text every few seconds:
-
-```powershell
-$env:POKER_VISION_OCR_DEBUG = "1"
-venv\Scripts\python -m src.main --console
-# or: venv\Scripts\python -m src.main --debug
-```
-
 ## Configuration
 
 Before running, edit `src/capture/screen.py` and adjust:

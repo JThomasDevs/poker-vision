@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 
 from src.capture.screen import ScreenCapture, select_window_interactive
 from src.detection.cards import CardDetector, DetectedCard, MockDetector
-from src.detection.table_amounts import AmountsThrottle, TableAmounts
 from src.engine.evaluator import HandResult, PokerEngine
 from src.overlay.display import OverlayDisplay, SimpleConsoleDisplay, DebugDisplay
 
@@ -26,23 +25,14 @@ class PokerVisionApp:
         mock_mode: bool = False,
         fast_cards: bool = False,
         villain_range: str = "strong",
-        enable_ocr: bool = True,
-        ocr_interval: float = 1.5,
     ):
         self.capture_interval = capture_interval
         self.confidence_threshold = confidence_threshold
         self.use_debug = use_debug
         self.fast_pipeline = None
         self._last_fast_result = None
-        self.enable_ocr = enable_ocr
-        self.amounts_throttle = AmountsThrottle(
-            interval_s=ocr_interval,
-            enabled=enable_ocr,
-        )
-        # Equity cache: recompute only when cards / amounts change
-        self._equity_key: Optional[
-            Tuple[Tuple[str, ...], Tuple[str, ...], Optional[float], Optional[float], Optional[float]]
-        ] = None
+        # Equity cache: recompute only when cards change
+        self._equity_key: Optional[Tuple[Tuple[str, ...], Tuple[str, ...]]] = None
         self._equity_result: Optional[HandResult] = None
         self._last_equity_ran = False
         self._timing_printed = False
@@ -87,12 +77,7 @@ class PokerVisionApp:
         self.is_running = False
         self.current_frame = None
         self._mock_notice_printed = False
-        ocr_msg = (
-            f"OCR every {ocr_interval:.1f}s (cache last good)"
-            if enable_ocr
-            else "OCR disabled (--no-ocr)"
-        )
-        print(f"Perf: {ocr_msg}; equity/classify cached when stable")
+        print("Perf: equity/classify cached when stable")
     
     def capture_frame(self):
         """Grab one frame only (no detection)."""
@@ -121,11 +106,7 @@ class PokerVisionApp:
         frame = self.capture_frame()
         return frame, self.detect_cards(frame)
     
-    def process_cards(
-        self,
-        cards: List[DetectedCard],
-        amounts: TableAmounts = None,
-    ) -> dict:
+    def process_cards(self, cards: List[DetectedCard]) -> dict:
         """Process detected cards into hand info."""
         self._last_equity_ran = False
         if len(cards) < 2:
@@ -174,18 +155,11 @@ class PokerVisionApp:
                 print(msg)
             return None
 
-        amt = amounts or TableAmounts()
-        key = (
-            tuple(hole_strs),
-            tuple(comm_strs),
-            amt.pot,
-            amt.to_call,
-            amt.hero_stack,
-        )
+        key = (tuple(hole_strs), tuple(comm_strs))
         if key == self._equity_key and self._equity_result is not None:
             result = self._equity_result
         else:
-            result = self.engine.evaluate_hand(hole_strs, comm_strs, amounts=amounts)
+            result = self.engine.evaluate_hand(hole_strs, comm_strs)
             self._equity_key = key
             self._equity_result = result
             self._last_equity_ran = True
@@ -203,7 +177,6 @@ class PokerVisionApp:
             "community_cards": comm_strs,
             "result": result,
             "cards": cards,
-            "amounts": amounts,
         }
     
     def run(self):
@@ -244,29 +217,15 @@ class PokerVisionApp:
                 )
                 h, w = frame.shape[:2] if frame is not None else (0, 0)
 
-                t0 = time.perf_counter()
-                amounts = (
-                    self.amounts_throttle.get(frame, debug=self.use_debug)
-                    if frame is not None
-                    else TableAmounts()
-                )
-                ms_ocr = (time.perf_counter() - t0) * 1000.0
-                ocr_ran = self.amounts_throttle.last_ran
-                amt_status = amounts.format_status()
-
                 ms_equity = 0.0
 
                 if cards and len(cards) >= 2:
                     t0 = time.perf_counter()
-                    hand_info = self.process_cards(cards, amounts=amounts)
+                    hand_info = self.process_cards(cards)
                     ms_equity = (time.perf_counter() - t0) * 1000.0
                     
                     if hand_info:
                         result = hand_info["result"]
-                        odds_bit = (
-                            f" odds={result.pot_odds:.0%}"
-                            if result.pot_odds is not None else ""
-                        )
                         
                         if self.use_debug:
                             self.display.update(
@@ -277,7 +236,6 @@ class PokerVisionApp:
                                 recommendation=result.recommendation,
                                 hole_cards=hand_info["hole_cards"],
                                 community_cards=hand_info["community_cards"],
-                                amounts=amounts,
                             )
                         else:
                             self.display.update(
@@ -286,7 +244,6 @@ class PokerVisionApp:
                                 recommendation=result.recommendation,
                                 hole_cards=hand_info["hole_cards"],
                                 community_cards=hand_info["community_cards"],
-                                amounts=amounts,
                             )
                         
                         # Overlay/debug: log to terminal. Console owns the screen — no scroll spam.
@@ -295,8 +252,7 @@ class PokerVisionApp:
                                   f"holes={hand_info['hole_cards']} board={hand_info['community_cards']} | "
                                   f"{result.hand_type} | "
                                   f"Win: {result.win_probability:.1%} | "
-                                  f"{result.recommendation}{odds_bit} | "
-                                  f"{amt_status}")
+                                  f"{result.recommendation}")
                     else:
                         wait_msg = (
                             f"blobs={n_blobs} holes=[{hole_labs}] board=[{board_labs}] "
@@ -308,12 +264,11 @@ class PokerVisionApp:
                             self.display.clear(
                                 hole_cards=hole_list,
                                 community_cards=board_list,
-                                amounts=amounts,
                                 message=wait_msg,
                             )
                         else:
                             print(f"[{time.strftime('%H:%M:%S')}] "
-                                  f"{w}x{h} {wait_msg} | {amt_status}")
+                                  f"{w}x{h} {wait_msg}")
                 else:
                     wait_msg = (
                         f"blobs={n_blobs} holes=[{hole_labs or '-'}] "
@@ -330,28 +285,25 @@ class PokerVisionApp:
                             community_cards=None,
                         )
                         print(f"[{time.strftime('%H:%M:%S')}] "
-                              f"{w}x{h} {wait_msg} | {amt_status}")
+                              f"{w}x{h} {wait_msg}")
                     elif self.use_console:
                         hole_list = hole_labs.split() if hole_labs else None
                         board_list = board_labs.split() if board_labs else None
                         self.display.clear(
                             hole_cards=hole_list,
                             community_cards=board_list,
-                            amounts=amounts,
                             message=wait_msg,
                         )
                     else:
                         self.display.clear()
                         print(f"[{time.strftime('%H:%M:%S')}] "
-                              f"{w}x{h} {wait_msg} | {amt_status}")
+                              f"{w}x{h} {wait_msg}")
 
                 if not self._timing_printed:
                     self._timing_printed = True
                     cache_bits = []
                     if not classify_ran and self.fast_pipeline is not None:
                         cache_bits.append("cards=cache")
-                    if not ocr_ran:
-                        cache_bits.append("ocr=cache" if self.enable_ocr else "ocr=off")
                     if not self._last_equity_ran:
                         cache_bits.append("equity=cache")
                     extra = f" ({', '.join(cache_bits)})" if cache_bits else ""
@@ -359,7 +311,6 @@ class PokerVisionApp:
                     print(
                         f"[timing] capture={ms_capture:.0f}ms "
                         f"cards={ms_cards:.0f}ms "
-                        f"ocr={ms_ocr:.0f}ms "
                         f"equity={ms_equity:.0f}ms{extra}"
                     )
 
@@ -412,17 +363,6 @@ def main():
         action="store_true",
         help="Force YOLO/mock detector even if classifier.pt exists",
     )
-    parser.add_argument(
-        "--no-ocr",
-        action="store_true",
-        help="Disable pot/to_call/stack OCR (faster loop; no pot-odds pricing)",
-    )
-    parser.add_argument(
-        "--ocr-interval",
-        type=float,
-        default=1.5,
-        help="Seconds between OCR passes when amounts enabled (default 1.5)",
-    )
     
     args = parser.parse_args()
 
@@ -457,8 +397,6 @@ def main():
         capture_interval=args.interval,
         fast_cards=use_fast,
         villain_range=args.villain_range,
-        enable_ocr=not args.no_ocr,
-        ocr_interval=args.ocr_interval,
     )
     
     app.engine.n_simulations = args.sims
