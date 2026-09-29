@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -101,6 +102,72 @@ def load_classifier(
     return model, meta, device
 
 
+@dataclass
+class ClassifierDist:
+    """Full rank/suit probability distributions from one classification."""
+
+    rank_probs: np.ndarray
+    suit_probs: np.ndarray
+    ranks: List[str]
+    suits: List[str]
+
+    def __post_init__(self) -> None:
+        self.rank_probs = np.asarray(self.rank_probs, dtype=np.float64).reshape(-1)
+        self.suit_probs = np.asarray(self.suit_probs, dtype=np.float64).reshape(-1)
+        rs = float(self.rank_probs.sum())
+        ss = float(self.suit_probs.sum())
+        if rs > 0:
+            self.rank_probs = self.rank_probs / rs
+        if ss > 0:
+            self.suit_probs = self.suit_probs / ss
+
+    def top_rank(self) -> str:
+        return self.ranks[int(self.rank_probs.argmax())]
+
+    def top_suit(self) -> str:
+        return self.suits[int(self.suit_probs.argmax())]
+
+    def top_label(self) -> str:
+        return f"{self.top_rank()}{self.top_suit()}"
+
+    def top_conf(self) -> float:
+        ri = int(self.rank_probs.argmax())
+        si = int(self.suit_probs.argmax())
+        return float(self.rank_probs[ri] * self.suit_probs[si])
+
+    def rank_margin(self) -> float:
+        p = self.rank_probs
+        if p.size < 2:
+            return float(p[0]) if p.size else 0.0
+        top2 = np.partition(p, -2)[-2:]
+        return float(top2[-1] - top2[-2])
+
+    def suit_margin(self) -> float:
+        p = self.suit_probs
+        if p.size < 2:
+            return float(p[0]) if p.size else 0.0
+        top2 = np.partition(p, -2)[-2:]
+        return float(top2[-1] - top2[-2])
+
+    def as_tuple(self) -> Tuple[str, str, float]:
+        return self.top_rank(), self.top_suit(), self.top_conf()
+
+
+def _tensor_probs_to_dist(
+    rp: torch.Tensor,
+    sp: torch.Tensor,
+    meta: Dict[str, Any],
+) -> ClassifierDist:
+    ranks = list(meta.get("ranks", RANKS))
+    suits = list(meta.get("suits", SUITS))
+    return ClassifierDist(
+        rank_probs=rp.detach().cpu().numpy().astype(np.float64),
+        suit_probs=sp.detach().cpu().numpy().astype(np.float64),
+        ranks=ranks,
+        suits=suits,
+    )
+
+
 def _bgr_to_probs(
     bgr: np.ndarray,
     model: DualHeadCardClassifier,
@@ -117,14 +184,34 @@ def _bgr_to_probs(
     return torch.softmax(rank_logits, dim=-1)[0], torch.softmax(suit_logits, dim=-1)[0]
 
 
+def _prefer_full_rank(
+    rp: torch.Tensor,
+    rp_f: torch.Tensor,
+    rp_u: torch.Tensor,
+    ranks: Sequence[str],
+    full_prefer_conf: float,
+) -> Tuple[torch.Tensor, bool]:
+    """Optionally replace blend mass with full-card one-hot-ish preference on confusion pairs."""
+    ri = int(rp.argmax().item())
+    ri_f = int(rp_f.argmax().item())
+    ri_u = int(rp_u.argmax().item())
+    prefer_full = False
+    if ranks[ri] != ranks[ri_f] and (ranks[ri], ranks[ri_f]) in RANK_CONFUSION_PAIRS:
+        prefer_full = True
+    if ranks[ri_f] != ranks[ri_u] and (ranks[ri_f], ranks[ri_u]) in RANK_CONFUSION_PAIRS:
+        prefer_full = True
+    if prefer_full and float(rp_f[ri_f].item()) >= full_prefer_conf:
+        return rp_f, True
+    return rp, False
+
+
 @torch.no_grad()
-def predict_image(
+def predict_image_dist(
     image: Union[str, Path, Image.Image],
     model: DualHeadCardClassifier,
     meta: Dict[str, Any],
     device: torch.device,
-) -> Tuple[str, str, float]:
-    """Return (rank, suit, confidence) with confidence = P(rank) * P(suit)."""
+) -> ClassifierDist:
     if isinstance(image, (str, Path)):
         img = Image.open(image).convert("RGB")
     else:
@@ -134,12 +221,43 @@ def predict_image(
     rank_logits, suit_logits = model(x)
     rank_p = torch.softmax(rank_logits, dim=-1)[0]
     suit_p = torch.softmax(suit_logits, dim=-1)[0]
-    ri = int(rank_p.argmax().item())
-    si = int(suit_p.argmax().item())
-    conf = float((rank_p[ri] * suit_p[si]).item())
+    return _tensor_probs_to_dist(rank_p, suit_p, meta)
+
+
+@torch.no_grad()
+def predict_image(
+    image: Union[str, Path, Image.Image],
+    model: DualHeadCardClassifier,
+    meta: Dict[str, Any],
+    device: torch.device,
+) -> Tuple[str, str, float]:
+    """Return (rank, suit, confidence) with confidence = P(rank) * P(suit)."""
+    return predict_image_dist(image, model, meta, device).as_tuple()
+
+
+@torch.no_grad()
+def predict_full_and_ul_dist(
+    full_bgr: np.ndarray,
+    ul_bgr: np.ndarray,
+    model: DualHeadCardClassifier,
+    meta: Dict[str, Any],
+    device: torch.device,
+    *,
+    full_rank_weight: float = 0.65,
+    full_prefer_conf: float = 0.35,
+) -> ClassifierDist:
+    """Blend full-card + UL index distributions; break digit ties toward full."""
+    rp_f, sp_f = _bgr_to_probs(full_bgr, model, meta, device)
+    rp_u, sp_u = _bgr_to_probs(ul_bgr, model, meta, device)
+
+    w = float(full_rank_weight)
+    w = min(max(w, 0.0), 1.0)
+    rp = w * rp_f + (1.0 - w) * rp_u
+    sp = 0.50 * sp_f + 0.50 * sp_u
+
     ranks = meta.get("ranks", RANKS)
-    suits = meta.get("suits", SUITS)
-    return ranks[ri], suits[si], conf
+    rp, _ = _prefer_full_rank(rp, rp_f, rp_u, ranks, full_prefer_conf)
+    return _tensor_probs_to_dist(rp, sp, meta)
 
 
 @torch.no_grad()
@@ -158,35 +276,15 @@ def predict_full_and_ul(
     Full-card center pips disambiguate 3/5/6/8/9; UL alone often swaps those
     ranks (and 5/9 ↔ T) when the index is tiny or partially occluded.
     """
-    rp_f, sp_f = _bgr_to_probs(full_bgr, model, meta, device)
-    rp_u, sp_u = _bgr_to_probs(ul_bgr, model, meta, device)
-
-    w = float(full_rank_weight)
-    w = min(max(w, 0.0), 1.0)
-    rp = w * rp_f + (1.0 - w) * rp_u
-    sp = 0.50 * sp_f + 0.50 * sp_u
-
-    ranks = meta.get("ranks", RANKS)
-    suits = meta.get("suits", SUITS)
-    ri = int(rp.argmax().item())
-    si = int(sp.argmax().item())
-    ri_f = int(rp_f.argmax().item())
-    ri_u = int(rp_u.argmax().item())
-
-    # Prefer the full-card rank when blend or UL disagrees on a known confusion pair
-    # and the full head is reasonably confident.
-    prefer_full = False
-    if ranks[ri] != ranks[ri_f] and (ranks[ri], ranks[ri_f]) in RANK_CONFUSION_PAIRS:
-        prefer_full = True
-    if ranks[ri_f] != ranks[ri_u] and (ranks[ri_f], ranks[ri_u]) in RANK_CONFUSION_PAIRS:
-        prefer_full = True
-    if prefer_full and float(rp_f[ri_f].item()) >= full_prefer_conf:
-        ri = ri_f
-        # Blend mass sits on the wrong digit; report full-rank confidence.
-        conf = float((rp_f[ri] * sp[si]).item())
-    else:
-        conf = float((rp[ri] * sp[si]).item())
-    return ranks[ri], suits[si], conf
+    return predict_full_and_ul_dist(
+        full_bgr,
+        ul_bgr,
+        model,
+        meta,
+        device,
+        full_rank_weight=full_rank_weight,
+        full_prefer_conf=full_prefer_conf,
+    ).as_tuple()
 
 
 def _clahe_bgr(bgr: np.ndarray, clip: float = 2.0) -> np.ndarray:
@@ -215,21 +313,15 @@ def _suit_pip_crop(card_bgr: np.ndarray) -> np.ndarray:
 
 
 @torch.no_grad()
-def predict_hole_card(
+def predict_hole_card_dist(
     full_bgr: np.ndarray,
     model: DualHeadCardClassifier,
     meta: Dict[str, Any],
     device: torch.device,
     *,
     ul_bgr: Optional[np.ndarray] = None,
-) -> Tuple[str, str, float]:
-    """Classify a hero hole crop; restore avatar-dimmed faces before the CNN.
-
-    Stake seats draw a circular portrait over the hole pair and darken the face
-    (train crops are near-white; live mid-right seats often mean≈100). Raw UL
-    max-conf then swaps 9↔6 and 2↔A. CLAHE restores contrast so the full face
-    (plus a suit-pip crop) reads correctly without a retrain.
-    """
+) -> ClassifierDist:
+    """Hole-card distributions with avatar-dim restore (same blends as predict_hole_card)."""
     from src.detection.layout import (
         avatar_contaminated,
         hole_index_crop,
@@ -249,15 +341,10 @@ def predict_hole_card(
         rp_p, sp_p = _bgr_to_probs(pip, model, meta, device)
 
         ranks = meta.get("ranks", RANKS)
-        suits = meta.get("suits", SUITS)
 
-        # Rank: restored full dominates; UL alone still swaps 6/9 and 2/A.
         rp = 0.70 * rp_f + 0.30 * rp_u
-        # Suit: pip crop beats index (rank glyph + haze flips h↔d).
         sp = 0.25 * sp_f + 0.25 * sp_u + 0.50 * sp_p
 
-        ri = int(rp.argmax().item())
-        si = int(sp.argmax().item())
         ri_f = int(rp_f.argmax().item())
         ri_u = int(rp_u.argmax().item())
         if (
@@ -265,27 +352,26 @@ def predict_hole_card(
             and (ranks[ri_f], ranks[ri_u]) in RANK_CONFUSION_PAIRS
             and float(rp_f[ri_f].item()) >= 0.30
         ):
-            ri = ri_f
-        conf = float((rp[ri] * sp[si]).item())
-        if conf >= 0.12:
-            return ranks[ri], suits[si], conf
+            rp = rp_f
 
-        # Low-confidence fallback: UL-heavy blend on the masked face.
+        dist = _tensor_probs_to_dist(rp, sp, meta)
+        if dist.top_conf() >= 0.12:
+            return dist
+
         masked = mask_circular_avatar(full_bgr)
-        return predict_full_and_ul(
+        return predict_full_and_ul_dist(
             masked,
             index if index is not None and index.size else hole_index_crop(masked),
             model,
             meta,
             device,
             full_rank_weight=0.15,
-            full_prefer_conf=1.01,  # disable prefer-full
+            full_prefer_conf=1.01,
         )
 
-    # Clean hole face: same blend as board, mild full preference on digit pairs.
     if index is None or index.size == 0:
         index = ul_crop(full_bgr, 0.50)
-    return predict_full_and_ul(
+    return predict_full_and_ul_dist(
         full_bgr,
         index,
         model,
@@ -294,6 +380,27 @@ def predict_hole_card(
         full_rank_weight=0.55,
         full_prefer_conf=0.35,
     )
+
+
+@torch.no_grad()
+def predict_hole_card(
+    full_bgr: np.ndarray,
+    model: DualHeadCardClassifier,
+    meta: Dict[str, Any],
+    device: torch.device,
+    *,
+    ul_bgr: Optional[np.ndarray] = None,
+) -> Tuple[str, str, float]:
+    """Classify a hero hole crop; restore avatar-dimmed faces before the CNN.
+
+    Stake seats draw a circular portrait over the hole pair and darken the face
+    (train crops are near-white; live mid-right seats often mean≈100). Raw UL
+    max-conf then swaps 9↔6 and 2↔A. CLAHE restores contrast so the full face
+    (plus a suit-pip crop) reads correctly without a retrain.
+    """
+    return predict_hole_card_dist(
+        full_bgr, model, meta, device, ul_bgr=ul_bgr
+    ).as_tuple()
 
 
 def parse_args(argv=None):
