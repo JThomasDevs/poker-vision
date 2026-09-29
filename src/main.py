@@ -131,20 +131,37 @@ class PokerVisionApp:
         if len(cards) < 2:
             return None
 
-        # Prefer layout split from the fast pipeline when available
+        # Prefer tracked TableState when present; else layout split from fast path
         fast = self._last_fast_result
-        if fast is not None and (fast.holes or fast.community):
+        table = getattr(fast, "table", None) if fast is not None else None
+        if table is not None:
+            if not table.state_valid:
+                return None
+            hole_strs = [
+                o.label
+                for o in table.hero
+                if o.visibility == "VISIBLE" and o.label and o.label != "??"
+            ][:2]
+            comm_strs = [
+                o.label
+                for o in table.board
+                if o.visibility == "VISIBLE" and o.label and o.label != "??"
+            ][:5]
+        elif fast is not None and (fast.holes or fast.community):
             holecards = [c.to_detected() for c in fast.holes]
             community = [c.to_detected() for c in fast.community]
+            hole_strs = [f"{c.rank}{c.suit}" for c in holecards[:2]]
+            comm_strs = [f"{c.rank}{c.suit}" for c in community[:5]]
         elif self.detector is not None:
             community, holecards = self.detector.classify_community_vs_holecards(cards)
             community = sorted(community, key=lambda c: c.bbox[0])
             holecards = sorted(holecards, key=lambda c: c.bbox[0])
+            hole_strs = [f"{c.rank}{c.suit}" for c in holecards[:2]]
+            comm_strs = [f"{c.rank}{c.suit}" for c in community[:5]]
         else:
-            community, holecards = [], list(cards)
-        
-        hole_strs = [f"{c.rank}{c.suit}" for c in holecards[:2]]
-        comm_strs = [f"{c.rank}{c.suit}" for c in community[:5]]
+            holecards = list(cards)
+            hole_strs = [f"{c.rank}{c.suit}" for c in holecards[:2]]
+            comm_strs = []
 
         if len(hole_strs) < 2:
             return None

@@ -1,6 +1,7 @@
 """Temporal card state: tracking, acceptance, table assembly, audit metrics."""
 
 from .accept import accept_table
+from .table import TableState, build_table_state
 from .tracker import CardTracker
 from .types import (
     BOARD_MIN_MARGIN,
@@ -52,10 +53,12 @@ __all__ = [
     "SLOT_BOARD",
     "SLOT_HERO",
     "TRANSITIONING",
+    "TableState",
     "UNKNOWN",
     "UNKNOWN_LABEL",
     "VISIBLE",
     "accept_table",
+    "build_table_state",
     "normalize_probs",
     "rank_margin",
     "suit_margin",

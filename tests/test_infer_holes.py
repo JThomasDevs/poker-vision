@@ -47,7 +47,10 @@ def test_rhyzome_avatar_holes_read_9c_2h():
 
     frame = cv2.imread(str(FIXTURE))
     assert frame is not None
-    pipe = FastCardsPipeline(checkpoint=CKPT, reuse_stable_boxes=False)
+    # CNN hole-path regression (tracker acceptance is stricter / covered elsewhere).
+    pipe = FastCardsPipeline(
+        checkpoint=CKPT, reuse_stable_boxes=False, use_tracker=False
+    )
     result = pipe.process(frame)
 
     assert len(result.hole_boxes) == 2

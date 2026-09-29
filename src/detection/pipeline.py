@@ -1,4 +1,4 @@
-"""Fast card path: blob find -> layout split -> CNN classify.
+"""Fast card path: blob find -> layout split -> CNN classify (+ optional tracker).
 
 Uses ``layout.py`` (Wave B1) when present; otherwise a thin local Y-split
 fallback (note: B1 lag — replace once ``src/detection/layout.py`` lands).
@@ -24,11 +24,23 @@ if str(_ROOT) not in sys.path:
 from src.classification.infer import (
     load_classifier,
     predict_full_and_ul,
+    predict_full_and_ul_dist,
     predict_hole_card,
+    predict_hole_card_dist,
     predict_image,
+    predict_image_dist,
 )
 from src.detection.blobs import find_card_blobs
 from src.detection.cards import DetectedCard
+from src.state.accept import accept_table
+from src.state.table import TableState, build_table_state
+from src.state.tracker import CardTracker
+from src.state.types import (
+    SLOT_BOARD,
+    SLOT_HERO,
+    VISIBLE,
+    RawDet,
+)
 
 Box = Tuple[int, int, int, int]
 
@@ -139,6 +151,7 @@ class FastCardsResult:
     community_boxes: List[Box] = field(default_factory=list)
     hole_boxes: List[Box] = field(default_factory=list)
     layout_backend: str = _LAYOUT_BACKEND
+    table: Optional[TableState] = None
 
     @property
     def community_labels(self) -> List[str]:
@@ -167,6 +180,19 @@ def _boxes_key(boxes: Sequence[Box], *, quant: int = 8) -> Tuple[Tuple[int, int,
     return tuple(sorted(keyed))
 
 
+def _obs_to_labeled(obs) -> Optional[LabeledCard]:
+    if obs.visibility != VISIBLE:
+        return None
+    if not obs.label or len(obs.label) < 2 or obs.label == "??":
+        return None
+    return LabeledCard(
+        rank=obs.rank,
+        suit=obs.suit,
+        confidence=float(obs.confidence),
+        bbox=obs.bbox,
+    )
+
+
 class FastCardsPipeline:
     """find_card_blobs -> layout split -> classify crops with classifier.pt."""
 
@@ -178,6 +204,7 @@ class FastCardsPipeline:
         *,
         reuse_stable_boxes: bool = True,
         box_quant: int = 12,
+        use_tracker: bool = True,
     ):
         ckpt = Path(checkpoint) if checkpoint else default_classifier_path()
         if not classifier_available(ckpt):
@@ -201,6 +228,8 @@ class FastCardsPipeline:
         self.layout_backend = _LAYOUT_BACKEND
         self.reuse_stable_boxes = reuse_stable_boxes
         self.box_quant = max(1, int(box_quant))
+        self.use_tracker = bool(use_tracker)
+        self.tracker = CardTracker() if self.use_tracker else None
         self._cached_key: Optional[
             Tuple[Tuple[Tuple[int, int, int, int], ...], Tuple[Tuple[int, int, int, int], ...]]
         ] = None
@@ -222,6 +251,14 @@ class FastCardsPipeline:
         )
         hero_boxes = select_hero_hole_pair(hole_boxes, frame_bgr)
 
+        if self.use_tracker and self.tracker is not None:
+            return self._process_tracked(
+                frame_bgr,
+                boxes=boxes,
+                community_boxes=community_boxes,
+                hero_boxes=hero_boxes,
+            )
+
         key = (
             _boxes_key(community_boxes, quant=self.box_quant),
             _boxes_key(hero_boxes, quant=self.box_quant),
@@ -242,6 +279,7 @@ class FastCardsPipeline:
                 community_boxes=list(community_boxes),
                 hole_boxes=list(hero_boxes),
                 layout_backend=self.layout_backend,
+                table=None,
             )
 
         community = self._dedupe_labels(
@@ -260,11 +298,134 @@ class FastCardsPipeline:
             community_boxes=list(community_boxes),
             hole_boxes=list(hero_boxes),
             layout_backend=self.layout_backend,
+            table=None,
         )
         self._cached_key = key
         self._cached_result = result
         self.last_classify_ran = True
         return result
+
+    def _process_tracked(
+        self,
+        frame_bgr: np.ndarray,
+        *,
+        boxes: Sequence[Box],
+        community_boxes: Sequence[Box],
+        hero_boxes: Sequence[Box],
+    ) -> FastCardsResult:
+        """Always classify with dist APIs, then tracker → accept → TableState."""
+        assert self.tracker is not None
+        community_sorted = sorted(community_boxes, key=lambda b: b[0])[:5]
+        hero_sorted = sorted(hero_boxes, key=lambda b: b[0])[:2]
+
+        raw_dets: List[RawDet] = []
+        raw_dets.extend(
+            self._classify_boxes_to_raw(
+                frame_bgr,
+                community_sorted,
+                hole_mode=False,
+                slot_ids=SLOT_BOARD[: len(community_sorted)],
+            )
+        )
+        raw_dets.extend(
+            self._classify_boxes_to_raw(
+                frame_bgr,
+                hero_sorted,
+                hole_mode=True,
+                slot_ids=SLOT_HERO[: len(hero_sorted)],
+            )
+        )
+
+        table, community, holes = self.apply_tracker_dets(
+            raw_dets,
+            board_detected=len(community_sorted) > 0,
+        )
+        self.last_classify_ran = True
+        return FastCardsResult(
+            community=community,
+            holes=holes,
+            boxes=list(boxes),
+            community_boxes=list(community_sorted),
+            hole_boxes=list(hero_sorted),
+            layout_backend=self.layout_backend,
+            table=table,
+        )
+
+    def apply_tracker_dets(
+        self,
+        raw_dets: Sequence[RawDet],
+        *,
+        board_detected: bool = False,
+    ) -> Tuple[TableState, List[LabeledCard], List[LabeledCard]]:
+        """Public test seam: tracker.update → accept_table → TableState + VISIBLE labels."""
+        if self.tracker is None:
+            self.tracker = CardTracker()
+            self.use_tracker = True
+        obs = self.tracker.update(list(raw_dets))
+        obs = accept_table(obs)
+        table = build_table_state(obs, board_detected=board_detected)
+        community: List[LabeledCard] = []
+        holes: List[LabeledCard] = []
+        for o in table.board:
+            labeled = _obs_to_labeled(o)
+            if labeled is not None:
+                community.append(labeled)
+        for o in table.hero:
+            labeled = _obs_to_labeled(o)
+            if labeled is not None:
+                holes.append(labeled)
+        return table, community[:5], holes[:2]
+
+    def _classify_boxes_to_raw(
+        self,
+        frame_bgr: np.ndarray,
+        boxes: Sequence[Box],
+        *,
+        hole_mode: bool,
+        slot_ids: Sequence[str],
+    ) -> List[RawDet]:
+        dets: List[RawDet] = []
+        for i, box in enumerate(boxes):
+            crop = _crop_box(frame_bgr, box)
+            if crop is None or crop.shape[0] < 2 or crop.shape[1] < 2:
+                continue
+            if hole_mode:
+                dist = predict_hole_card_dist(
+                    crop, self.model, self.meta, self.device
+                )
+            elif ul_crop is not None:
+                index = ul_crop(crop, 0.55)
+                if index is not None and index.size > 0:
+                    dist = predict_full_and_ul_dist(
+                        crop, index, self.model, self.meta, self.device
+                    )
+                else:
+                    rgb_full = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    dist = predict_image_dist(
+                        Image.fromarray(rgb_full),
+                        self.model,
+                        self.meta,
+                        self.device,
+                    )
+            else:
+                rgb_full = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                dist = predict_image_dist(
+                    Image.fromarray(rgb_full),
+                    self.model,
+                    self.meta,
+                    self.device,
+                )
+            slot_hint = slot_ids[i] if i < len(slot_ids) else None
+            dets.append(
+                RawDet(
+                    bbox=box,
+                    rank_probs=dist.rank_probs,
+                    suit_probs=dist.suit_probs,
+                    hole_mode=hole_mode,
+                    slot_hint=slot_hint,
+                )
+            )
+        return dets
 
     def _classify_boxes(
         self,
@@ -359,6 +520,12 @@ def main(argv=None) -> int:
     pipe = FastCardsPipeline(checkpoint=args.checkpoint, device=args.device)
     result = pipe.process(frame)
     print(f"layout={result.layout_backend}  blobs={len(result.boxes)}")
+    if result.table is not None:
+        print(
+            f"table: valid={result.table.state_valid} "
+            f"conf={result.table.vision_confidence:.3f} "
+            f"unc={result.table.uncertainty:.3f}"
+        )
     print(f"community: {' '.join(result.community_labels) or '(none)'}")
     print(f"holes:     {' '.join(result.hole_labels) or '(none)'}")
     for kind, cards in (("board", result.community), ("hero", result.holes)):
