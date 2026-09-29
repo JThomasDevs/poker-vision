@@ -25,6 +25,17 @@ from .types import (
     top_from_probs,
 )
 
+# Known hole accept/reject reason strings (instrumentation / tests).
+HOLE_REASON_ACCEPTED_STRONG = "accepted_strong"
+HOLE_REASON_ACCEPTED_MODERATE = "accepted_moderate"
+HOLE_REASON_NOT_BOX_STABLE = "not_box_stable"
+HOLE_REASON_WEAK_CONF = "weak_conf"
+HOLE_REASON_WEAK_MARGIN = "weak_margin"
+HOLE_REASON_NEED_STABLE_2 = "need_stable_2"
+HOLE_REASON_WEAK_TEMPORAL = "weak_temporal"
+HOLE_REASON_DUPLICATE = "duplicate_label"
+HOLE_REASON_UNKNOWN = "UNKNOWN"
+
 
 def _is_hole(
     obs: CardObservation,
@@ -48,10 +59,14 @@ def _passes_board_gate(obs: CardObservation) -> bool:
     )
 
 
-def _passes_hole_gate(obs: CardObservation) -> bool:
-    """Adaptive hole acceptance: strong → frame 1; moderate → 2 + temporal."""
+def hole_accept_reason(obs: CardObservation) -> str:
+    """Explain hole gate outcome without changing thresholds.
+
+    Reasons: accepted_strong | accepted_moderate | not_box_stable |
+    weak_conf | weak_margin | need_stable_2 | weak_temporal | UNKNOWN
+    """
     if not obs.box_stable:
-        return False
+        return HOLE_REASON_NOT_BOX_STABLE
 
     # STRONG: high conf + high margin → accept on first quality frame.
     if (
@@ -59,18 +74,28 @@ def _passes_hole_gate(obs: CardObservation) -> bool:
         and obs.rank_margin >= HOLE_STRONG_MARGIN
         and obs.stable_frames >= HOLE_STRONG_STABLE_FRAMES
     ):
-        return True
+        return HOLE_REASON_ACCEPTED_STRONG
 
-    # MODERATE: baseline thresholds need two confirming frames + temporal.
-    if (
-        obs.confidence >= HOLE_MIN_TOP
-        and obs.rank_margin >= HOLE_MIN_MARGIN
-        and obs.stable_frames >= HOLE_MIN_STABLE_FRAMES
-        and obs.temporal_agreement >= HOLE_MIN_TEMPORAL
-    ):
-        return True
+    # Diagnose moderate-path failures first (order matches user-facing labels).
+    if obs.confidence < HOLE_MIN_TOP:
+        return HOLE_REASON_WEAK_CONF
+    if obs.rank_margin < HOLE_MIN_MARGIN:
+        return HOLE_REASON_WEAK_MARGIN
+    if obs.stable_frames < HOLE_MIN_STABLE_FRAMES:
+        return HOLE_REASON_NEED_STABLE_2
+    if obs.temporal_agreement < HOLE_MIN_TEMPORAL:
+        return HOLE_REASON_WEAK_TEMPORAL
 
-    return False
+    return HOLE_REASON_ACCEPTED_MODERATE
+
+
+def _passes_hole_gate(obs: CardObservation) -> bool:
+    """Adaptive hole acceptance: strong → frame 1; moderate → 2 + temporal."""
+    reason = hole_accept_reason(obs)
+    return reason in (
+        HOLE_REASON_ACCEPTED_STRONG,
+        HOLE_REASON_ACCEPTED_MODERATE,
+    )
 
 
 def _demote(obs: CardObservation) -> None:
@@ -95,14 +120,20 @@ def accept_table(
     Hole cards use adaptive gates (strong → 1 frame, moderate → 2 + temporal).
     Board keeps first-frame acceptance. Failures become UNKNOWN / ??.
     Among local passers, duplicate labels keep the higher-confidence observation
-    and demote the rest.
+    and demote the rest. Hole observations get ``accept_reason`` set for debug.
     """
     passed: List[CardObservation] = []
     for o in obs:
         if _is_hole(o, hole_slots, board_slots):
-            ok = _passes_hole_gate(o)
+            reason = hole_accept_reason(o)
+            o.accept_reason = reason
+            ok = reason in (
+                HOLE_REASON_ACCEPTED_STRONG,
+                HOLE_REASON_ACCEPTED_MODERATE,
+            )
         else:
             ok = _passes_board_gate(o)
+            o.accept_reason = None
         if ok:
             _promote(o)
             passed.append(o)
@@ -120,5 +151,7 @@ def accept_table(
         for o in group:
             if o is not winner:
                 _demote(o)
+                if _is_hole(o, hole_slots, board_slots):
+                    o.accept_reason = HOLE_REASON_DUPLICATE
 
     return obs

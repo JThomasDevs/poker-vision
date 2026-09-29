@@ -110,6 +110,14 @@ class ClassifierDist:
     suit_probs: np.ndarray
     ranks: List[str]
     suits: List[str]
+    # Hole-path diagnostics (None for board / non-hole callers).
+    hole_path: Optional[str] = None  # "cheap" | "enhanced"
+    cheap_label: Optional[str] = None
+    cheap_conf: Optional[float] = None
+    cheap_margin: Optional[float] = None
+    enhanced_label: Optional[str] = None
+    enhanced_conf: Optional[float] = None
+    enhanced_margin: Optional[float] = None
 
     def __post_init__(self) -> None:
         self.rank_probs = np.asarray(self.rank_probs, dtype=np.float64).reshape(-1)
@@ -152,6 +160,27 @@ class ClassifierDist:
     def as_tuple(self) -> Tuple[str, str, float]:
         return self.top_rank(), self.top_suit(), self.top_conf()
 
+    def stamp_cheap_path(self) -> "ClassifierDist":
+        """Mark this dist as a cheap-path early return."""
+        self.hole_path = "cheap"
+        self.cheap_label = self.top_label()
+        self.cheap_conf = self.top_conf()
+        self.cheap_margin = self.rank_margin()
+        self.enhanced_label = None
+        self.enhanced_conf = None
+        self.enhanced_margin = None
+        return self
+
+    def stamp_enhanced_path(self, cheap: "ClassifierDist") -> "ClassifierDist":
+        """Mark this dist as enhanced; keep cheap snapshot for debug."""
+        self.hole_path = "enhanced"
+        self.cheap_label = cheap.top_label()
+        self.cheap_conf = cheap.top_conf()
+        self.cheap_margin = cheap.rank_margin()
+        self.enhanced_label = self.top_label()
+        self.enhanced_conf = self.top_conf()
+        self.enhanced_margin = self.rank_margin()
+        return self
 
 def _tensor_probs_to_dist(
     rp: torch.Tensor,
@@ -351,11 +380,11 @@ def predict_hole_card_dist(
         cheap.top_conf() >= HOLE_STRONG_TOP
         and cheap.rank_margin() >= HOLE_STRONG_MARGIN
     ):
-        return cheap
+        return cheap.stamp_cheap_path()
 
     contaminated = avatar_contaminated(full_bgr)
     if not contaminated:
-        return cheap
+        return cheap.stamp_cheap_path()
 
     restored = _clahe_bgr(full_bgr, clip=2.0)
     idx = hole_index_crop(restored, frac_h=0.42, frac_w=0.50)
@@ -380,10 +409,10 @@ def predict_hole_card_dist(
 
     dist = _tensor_probs_to_dist(rp, sp, meta)
     if dist.top_conf() >= 0.12:
-        return dist
+        return dist.stamp_enhanced_path(cheap)
 
     masked = mask_circular_avatar(full_bgr)
-    return predict_full_and_ul_dist(
+    masked_dist = predict_full_and_ul_dist(
         masked,
         index if index is not None and index.size else hole_index_crop(masked),
         model,
@@ -392,6 +421,7 @@ def predict_hole_card_dist(
         full_rank_weight=0.15,
         full_prefer_conf=1.01,
     )
+    return masked_dist.stamp_enhanced_path(cheap)
 
 
 @torch.no_grad()

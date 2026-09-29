@@ -111,6 +111,7 @@ class CardObservation:
     temporal_agreement: float = 0.0
     hole_mode: bool = False
     recent_labels: List[str] = field(default_factory=list)
+    accept_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.rank_probs = normalize_probs(self.rank_probs, n=13)

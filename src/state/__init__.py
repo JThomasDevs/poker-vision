@@ -1,6 +1,19 @@
 """Temporal card state: tracking, acceptance, table assembly, audit metrics."""
 
-from .accept import accept_table
+from .accept import (
+    HOLE_REASON_ACCEPTED_MODERATE,
+    HOLE_REASON_ACCEPTED_STRONG,
+    HOLE_REASON_DUPLICATE,
+    HOLE_REASON_NEED_STABLE_2,
+    HOLE_REASON_NOT_BOX_STABLE,
+    HOLE_REASON_UNKNOWN,
+    HOLE_REASON_WEAK_CONF,
+    HOLE_REASON_WEAK_MARGIN,
+    HOLE_REASON_WEAK_TEMPORAL,
+    accept_table,
+    hole_accept_reason,
+)
+from .hero_diag import HeroSlotDiag, HeroTickDiag
 from .table import TableState, build_table_state
 from .tracker import CardTracker
 from .types import (
@@ -48,9 +61,20 @@ __all__ = [
     "HOLE_MIN_STABLE_FRAMES",
     "HOLE_MIN_TEMPORAL",
     "HOLE_MIN_TOP",
+    "HOLE_REASON_ACCEPTED_MODERATE",
+    "HOLE_REASON_ACCEPTED_STRONG",
+    "HOLE_REASON_DUPLICATE",
+    "HOLE_REASON_NEED_STABLE_2",
+    "HOLE_REASON_NOT_BOX_STABLE",
+    "HOLE_REASON_UNKNOWN",
+    "HOLE_REASON_WEAK_CONF",
+    "HOLE_REASON_WEAK_MARGIN",
+    "HOLE_REASON_WEAK_TEMPORAL",
     "HOLE_STRONG_MARGIN",
     "HOLE_STRONG_STABLE_FRAMES",
     "HOLE_STRONG_TOP",
+    "HeroSlotDiag",
+    "HeroTickDiag",
     "IOU_MATCH",
     "LOW_MARGIN_WEIGHT",
     "MARGIN_WEAK",
@@ -65,6 +89,7 @@ __all__ = [
     "VISIBLE",
     "accept_table",
     "build_table_state",
+    "hole_accept_reason",
     "normalize_probs",
     "rank_margin",
     "suit_margin",

@@ -3,7 +3,9 @@ Poker Vision - Main Application
 Captures Stake.us poker tables and provides hand recommendations.
 """
 
+import os
 import time
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from src.capture.screen import ScreenCapture, select_window_interactive
@@ -13,23 +15,32 @@ from src.overlay.display import OverlayDisplay, SimpleConsoleDisplay, DebugDispl
 from src.util.cards_format import format_cards_list
 
 
+def _env_flag(name: str) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 class PokerVisionApp:
     """Main application controller."""
-    
+
     def __init__(
         self,
         capture: ScreenCapture = None,
         use_overlay: bool = True,
         use_debug: bool = False,
-        capture_interval: float = 0.25,
+        capture_interval: float = 1.0,
         confidence_threshold: float = 0.7,
         mock_mode: bool = False,
         fast_cards: bool = False,
         villain_range: str = "strong",
+        debug_holes: bool = False,
+        debug_holes_log: Optional[Path] = None,
     ):
         self.capture_interval = capture_interval
         self.confidence_threshold = confidence_threshold
         self.use_debug = use_debug
+        self.debug_holes = bool(debug_holes) or _env_flag("POKER_VISION_DEBUG_HOLES")
+        self.debug_holes_log = Path(debug_holes_log) if debug_holes_log else None
         self.fast_pipeline = None
         self._last_fast_result = None
         # Equity cache: recompute only when cards change
@@ -37,14 +48,14 @@ class PokerVisionApp:
         self._equity_result: Optional[HandResult] = None
         self._last_equity_ran = False
         self._timing_printed = False
-        
+
         # Initialize capture
         if capture:
             self.capture = capture
         else:
             print("Initializing screen capture...")
             self.capture = ScreenCapture(mock_mode=mock_mode)
-        
+
         if fast_cards:
             from src.detection.pipeline import FastCardsPipeline, default_classifier_path
 
@@ -58,10 +69,10 @@ class PokerVisionApp:
             self.detector = CardDetector()
             self.detector.confidence_threshold = confidence_threshold
             self._mock_detector = MockDetector()
-        
+
         print(f"Initializing poker engine (villain_range={villain_range})...")
         self.engine = PokerEngine(n_simulations=500, villain_range=villain_range)
-        
+
         print("Initializing display...")
         self.use_console = not use_overlay and not use_debug
         if use_debug:
@@ -70,16 +81,49 @@ class PokerVisionApp:
             self.display = OverlayDisplay()
         else:
             self.display = SimpleConsoleDisplay()
-        
+
         # Start display window if debug
         if use_debug:
             self.display.run()
-        
+
         self.is_running = False
         self.current_frame = None
         self._mock_notice_printed = False
         print("Perf: equity/classify cached when stable")
-    
+        if self.debug_holes:
+            print("Hero hole debug: --debug-holes on (per-tick path diagnostics)")
+
+    def _maybe_print_hero_diag(self, fast) -> None:
+        """Print compact hero-path diag when flag on or holes still incomplete."""
+        if fast is None:
+            return
+        diag = getattr(fast, "hero_diag", None) or getattr(
+            self.fast_pipeline, "last_hero_diag", None
+        )
+        if diag is None:
+            return
+
+        holes_accepted = len(getattr(fast, "holes", []) or [])
+        board_n = len(getattr(fast, "community", []) or [])
+
+        # --debug-holes / env: always print each tick.
+        # Flag off: optional quiet hint when board cards exist but holes=[].
+        if self.debug_holes:
+            should_print = True
+        else:
+            should_print = holes_accepted == 0 and board_n > 0
+        if not should_print:
+            return
+
+        line = diag.format_line()
+        print(line)
+        if self.debug_holes_log is not None:
+            try:
+                with self.debug_holes_log.open("a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+            except OSError as exc:
+                print(f"[holes] log write failed: {exc}")
+
     def capture_frame(self):
         """Grab one frame only (no detection)."""
         frame = self.capture.capture()
@@ -106,7 +150,7 @@ class PokerVisionApp:
         """Capture screen and detect cards. Returns (frame, cards)."""
         frame = self.capture_frame()
         return frame, self.detect_cards(frame)
-    
+
     def process_cards(self, cards: List[DetectedCard]) -> dict:
         """Process detected cards into hand info."""
         self._last_equity_ran = False
@@ -178,23 +222,23 @@ class PokerVisionApp:
             else:
                 print(msg)
             return None
-        
+
         return {
             "hole_cards": hole_strs,
             "community_cards": comm_strs,
             "result": result,
             "cards": cards,
         }
-    
+
     def run(self):
         """Main application loop."""
         self.is_running = True
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("POKER VISION - Running")
         print("Press Ctrl+C to stop")
         print("Need an open table with hole cards visible (lobby = no cards).")
-        print("="*50 + "\n")
-        
+        print("=" * 50 + "\n")
+
         try:
             while self.is_running:
                 loop_t0 = time.perf_counter()
@@ -208,6 +252,7 @@ class PokerVisionApp:
                 ms_cards = (time.perf_counter() - t0) * 1000.0
 
                 fast = self._last_fast_result
+                self._maybe_print_hero_diag(fast)
                 classify_ran = (
                     bool(getattr(self.fast_pipeline, "last_classify_ran", True))
                     if self.fast_pipeline is not None
@@ -216,8 +261,9 @@ class PokerVisionApp:
 
                 n_blobs = len(fast.boxes) if fast is not None else len(cards or [])
                 hole_labs = (
-                    " ".join(fast.hole_labels) if fast is not None else
-                    " ".join(f"{c.rank}{c.suit}" for c in (cards or [])[:2])
+                    " ".join(fast.hole_labels)
+                    if fast is not None
+                    else " ".join(f"{c.rank}{c.suit}" for c in (cards or [])[:2])
                 )
                 board_labs = (
                     " ".join(fast.community_labels) if fast is not None else ""
@@ -235,10 +281,10 @@ class PokerVisionApp:
                     t0 = time.perf_counter()
                     hand_info = self.process_cards(cards)
                     ms_equity = (time.perf_counter() - t0) * 1000.0
-                    
+
                     if hand_info:
                         result = hand_info["result"]
-                        
+
                         if self.use_debug:
                             self.display.update(
                                 frame=frame,
@@ -257,14 +303,16 @@ class PokerVisionApp:
                                 hole_cards=hand_info["hole_cards"],
                                 community_cards=hand_info["community_cards"],
                             )
-                        
+
                         # Overlay/debug: log to terminal. Console owns the screen — no scroll spam.
                         if not self.use_console:
-                            print(f"[{time.strftime('%H:%M:%S')}] "
-                                  f"holes={hand_info['hole_cards']} board={hand_info['community_cards']} | "
-                                  f"{result.hand_type} | "
-                                  f"Win: {result.win_probability:.1%} | "
-                                  f"{result.recommendation}")
+                            print(
+                                f"[{time.strftime('%H:%M:%S')}] "
+                                f"holes={hand_info['hole_cards']} board={hand_info['community_cards']} | "
+                                f"{result.hand_type} | "
+                                f"Win: {result.win_probability:.1%} | "
+                                f"{result.recommendation}"
+                            )
                     else:
                         if self.use_console:
                             wait_msg = (
@@ -286,8 +334,10 @@ class PokerVisionApp:
                                 message=wait_msg,
                             )
                         else:
-                            print(f"[{time.strftime('%H:%M:%S')}] "
-                                  f"{w}x{h} {wait_msg}")
+                            print(
+                                f"[{time.strftime('%H:%M:%S')}] "
+                                f"{w}x{h} {wait_msg}"
+                            )
                 else:
                     if self.use_console:
                         wait_msg = (
@@ -309,8 +359,10 @@ class PokerVisionApp:
                             hole_cards=None,
                             community_cards=None,
                         )
-                        print(f"[{time.strftime('%H:%M:%S')}] "
-                              f"{w}x{h} {wait_msg}")
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] "
+                            f"{w}x{h} {wait_msg}"
+                        )
                     elif self.use_console:
                         hole_list = hole_labs.split() if hole_labs else None
                         board_list = board_labs.split() if board_labs else None
@@ -321,8 +373,10 @@ class PokerVisionApp:
                         )
                     else:
                         self.display.clear()
-                        print(f"[{time.strftime('%H:%M:%S')}] "
-                              f"{w}x{h} {wait_msg}")
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] "
+                            f"{w}x{h} {wait_msg}"
+                        )
 
                 if not self._timing_printed:
                     self._timing_printed = True
@@ -344,11 +398,11 @@ class PokerVisionApp:
                 sleep_for = max(0.0, self.capture_interval - elapsed)
                 if sleep_for > 0:
                     time.sleep(sleep_for)
-                
+
         except KeyboardInterrupt:
             print("\nStopping...")
             self.stop()
-    
+
     def stop(self):
         self.is_running = False
         self.display.close()
@@ -359,18 +413,22 @@ def main():
     import argparse
 
     from src.detection.pipeline import classifier_available
-    
+
     parser = argparse.ArgumentParser(description="Poker Vision - Stake.us Assistant")
     parser.add_argument("--console", action="store_true", help="Console output only")
-    parser.add_argument("--debug", action="store_true", help="Show debug window with bounding boxes")
+    parser.add_argument(
+        "--debug", action="store_true", help="Show debug window with bounding boxes"
+    )
     parser.add_argument("--mock", action="store_true", help="Use mock capture for testing")
     parser.add_argument("--fullscreen", action="store_true", help="Capture full screen")
-    parser.add_argument("--select", action="store_true", help="Interactively select window to capture")
+    parser.add_argument(
+        "--select", action="store_true", help="Interactively select window to capture"
+    )
     parser.add_argument(
         "--interval",
         type=float,
-        default=0.25,
-        help="Capture interval in seconds (default: 0.25 for faster hole recognition)",
+        default=1.0,
+        help="Capture interval in seconds (default: 1.0)",
     )
     parser.add_argument("--sims", type=int, default=500, help="Monte Carlo simulations")
     parser.add_argument(
@@ -393,15 +451,24 @@ def main():
         action="store_true",
         help="Force YOLO/mock detector even if classifier.pt exists",
     )
-    
+    parser.add_argument(
+        "--debug-holes",
+        action="store_true",
+        help="Print per-tick hero hole recognition diagnostics",
+    )
+    parser.add_argument(
+        "--debug-holes-log",
+        type=Path,
+        default=None,
+        help="Optional path to append hero hole diag lines (with --debug-holes)",
+    )
+
     args = parser.parse_args()
 
     # Sensible default: use CNN when classifier.pt is present; --fast-cards forces it;
     # --yolo keeps the existing COCO YOLO / mock detector path.
-    use_fast = bool(args.fast_cards) or (
-        classifier_available() and not args.yolo
-    )
-    
+    use_fast = bool(args.fast_cards) or (classifier_available() and not args.yolo)
+
     # Select capture source
     capture = None
     if args.select:
@@ -418,7 +485,7 @@ def main():
         if capture is None:
             print("Using default capture (mock mode)")
             capture = ScreenCapture(mock_mode=True)
-    
+
     # Create and run app
     app = PokerVisionApp(
         capture=capture,
@@ -427,8 +494,10 @@ def main():
         capture_interval=args.interval,
         fast_cards=use_fast,
         villain_range=args.villain_range,
+        debug_holes=bool(args.debug_holes) or _env_flag("POKER_VISION_DEBUG_HOLES"),
+        debug_holes_log=args.debug_holes_log,
     )
-    
+
     app.engine.n_simulations = args.sims
     app.run()
 

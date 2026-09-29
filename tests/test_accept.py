@@ -90,6 +90,7 @@ def test_strong_hole_accepts_on_first_frame():
     out = accept_table([hole])
     assert out[0].visibility == VISIBLE
     assert out[0].label == "Kh"
+    assert out[0].accept_reason == "accepted_strong"
 
 
 def test_moderate_hole_needs_two_frames():

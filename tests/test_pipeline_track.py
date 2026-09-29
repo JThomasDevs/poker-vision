@@ -50,6 +50,8 @@ def _pipe_seam() -> FastCardsPipeline:
     pipe = object.__new__(FastCardsPipeline)
     pipe.tracker = CardTracker()
     pipe.use_tracker = True
+    pipe._hole_classify_diags = []
+    pipe.last_hero_diag = None
     return pipe
 
 

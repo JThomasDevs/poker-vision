@@ -33,6 +33,7 @@ from src.classification.infer import (
 from src.detection.blobs import find_card_blobs
 from src.detection.cards import DetectedCard
 from src.state.accept import accept_table
+from src.state.hero_diag import HeroSlotDiag, HeroTickDiag
 from src.state.table import TableState, build_table_state
 from src.state.tracker import CardTracker, box_iou
 from src.state.types import (
@@ -41,6 +42,7 @@ from src.state.types import (
     SLOT_HERO,
     VISIBLE,
     RawDet,
+    top_from_probs,
 )
 
 Box = Tuple[int, int, int, int]
@@ -158,6 +160,7 @@ class FastCardsResult:
     hole_boxes: List[Box] = field(default_factory=list)
     layout_backend: str = _LAYOUT_BACKEND
     table: Optional[TableState] = None
+    hero_diag: Optional[HeroTickDiag] = None
 
     @property
     def community_labels(self) -> List[str]:
@@ -245,6 +248,9 @@ class FastCardsPipeline:
         self._hero_rois: Optional[List[Box]] = None
         self._hero_roi_stable_count: int = 0
         self._hero_roi_miss_count: int = 0
+        self.last_hero_diag: Optional[HeroTickDiag] = None
+        # Per-slot classify diagnostics for the current tick (hole_mode only).
+        self._hole_classify_diags: List[HeroSlotDiag] = []
 
     def _invalidate_hero_rois(self) -> None:
         self._hero_rois = None
@@ -298,7 +304,9 @@ class FastCardsPipeline:
         if frame_bgr is None or frame_bgr.size == 0:
             self.last_classify_ran = False
             self._invalidate_hero_rois()
-            return FastCardsResult(layout_backend=self.layout_backend)
+            diag = HeroTickDiag(stage_reason="no_blobs")
+            self.last_hero_diag = diag
+            return FastCardsResult(layout_backend=self.layout_backend, hero_diag=diag)
 
         raw_boxes = find_card_blobs(frame_bgr)
         if filter_card_like_boxes is not None:
@@ -311,13 +319,24 @@ class FastCardsPipeline:
         hero_boxes = select_hero_hole_pair(hole_boxes, frame_bgr)
         hero_boxes = self._resolve_hero_rois(hero_boxes)
 
+        diag = HeroTickDiag(
+            hero_blobs=len(hero_boxes),
+            filtered_blobs=len(boxes),
+            raw_blobs=len(raw_boxes),
+            candidate_boxes=list(hero_boxes),
+        )
+        diag.set_stage_from_counts()
+
         if self.use_tracker and self.tracker is not None:
-            return self._process_tracked(
+            result = self._process_tracked(
                 frame_bgr,
                 boxes=boxes,
                 community_boxes=community_boxes,
                 hero_boxes=hero_boxes,
+                hero_diag=diag,
             )
+            self.last_hero_diag = result.hero_diag
+            return result
 
         key = (
             _boxes_key(community_boxes, quant=self.box_quant),
@@ -332,6 +351,9 @@ class FastCardsPipeline:
             # Boxes stable → reuse CNN labels (dual full+UL is expensive).
             self.last_classify_ran = False
             cached = self._cached_result
+            # Keep stage/blob counts fresh; slot classify diags stay from cache miss.
+            diag.stage_reason = diag.stage_reason or "cache_hit"
+            self.last_hero_diag = diag
             return FastCardsResult(
                 community=list(cached.community),
                 holes=list(cached.holes),
@@ -340,6 +362,7 @@ class FastCardsPipeline:
                 hole_boxes=list(hero_boxes),
                 layout_backend=self.layout_backend,
                 table=None,
+                hero_diag=diag,
             )
 
         community = self._dedupe_labels(
@@ -359,10 +382,12 @@ class FastCardsPipeline:
             hole_boxes=list(hero_boxes),
             layout_backend=self.layout_backend,
             table=None,
+            hero_diag=diag,
         )
         self._cached_key = key
         self._cached_result = result
         self.last_classify_ran = True
+        self.last_hero_diag = diag
         return result
 
     def _process_tracked(
@@ -372,12 +397,22 @@ class FastCardsPipeline:
         boxes: Sequence[Box],
         community_boxes: Sequence[Box],
         hero_boxes: Sequence[Box],
+        hero_diag: Optional[HeroTickDiag] = None,
     ) -> FastCardsResult:
         """Always classify with dist APIs, then tracker → accept → TableState."""
         assert self.tracker is not None
         community_sorted = sorted(community_boxes, key=lambda b: b[0])[:5]
         hero_sorted = sorted(hero_boxes, key=lambda b: b[0])[:2]
 
+        diag = hero_diag or HeroTickDiag(
+            hero_blobs=len(hero_sorted),
+            filtered_blobs=len(boxes),
+            candidate_boxes=list(hero_sorted),
+        )
+        diag.candidate_boxes = list(hero_sorted)
+        diag.hero_blobs = len(hero_sorted)
+
+        self._hole_classify_diags = []
         raw_dets: List[RawDet] = []
         raw_dets.extend(
             self._classify_boxes_to_raw(
@@ -399,8 +434,10 @@ class FastCardsPipeline:
         table, community, holes = self.apply_tracker_dets(
             raw_dets,
             board_detected=len(community_sorted) > 0,
+            hero_diag=diag,
         )
         self.last_classify_ran = True
+        self.last_hero_diag = diag
         return FastCardsResult(
             community=community,
             holes=holes,
@@ -409,6 +446,7 @@ class FastCardsPipeline:
             hole_boxes=list(hero_sorted),
             layout_backend=self.layout_backend,
             table=table,
+            hero_diag=diag,
         )
 
     def apply_tracker_dets(
@@ -416,6 +454,7 @@ class FastCardsPipeline:
         raw_dets: Sequence[RawDet],
         *,
         board_detected: bool = False,
+        hero_diag: Optional[HeroTickDiag] = None,
     ) -> Tuple[TableState, List[LabeledCard], List[LabeledCard]]:
         """Public test seam: tracker.update → accept_table → TableState + VISIBLE labels."""
         if self.tracker is None:
@@ -424,6 +463,32 @@ class FastCardsPipeline:
         obs = self.tracker.update(list(raw_dets))
         obs = accept_table(obs)
         table = build_table_state(obs, board_detected=board_detected)
+
+        if hero_diag is not None:
+            classify_by_slot = {
+                d.slot_id: d
+                for d in getattr(self, "_hole_classify_diags", [])
+                if d.slot_id
+            }
+            hero_diag.slots = []
+            for o in table.hero:
+                slot = classify_by_slot.get(o.slot_id) or HeroSlotDiag(
+                    slot_id=o.slot_id
+                )
+                slot.box = o.bbox
+                slot.box_stable = bool(o.box_stable)
+                if o.confidence > 0 or (
+                    o.rank_probs is not None and float(o.rank_probs.max()) > 0
+                ):
+                    r, s, conf = top_from_probs(o.rank_probs, o.suit_probs)
+                    slot.banked_label = f"{r}{s}"
+                    slot.banked_conf = float(conf)
+                    slot.banked_margin = float(o.rank_margin)
+                slot.reason = o.accept_reason or "UNKNOWN"
+                hero_diag.slots.append(slot)
+            if not hero_diag.slots:
+                hero_diag.set_stage_from_counts()
+
         community: List[LabeledCard] = []
         holes: List[LabeledCard] = []
         for o in table.board:
@@ -452,6 +517,20 @@ class FastCardsPipeline:
             if hole_mode:
                 dist = predict_hole_card_dist(
                     crop, self.model, self.meta, self.device
+                )
+                slot_hint = slot_ids[i] if i < len(slot_ids) else f"hero_{i}"
+                self._hole_classify_diags.append(
+                    HeroSlotDiag(
+                        slot_id=slot_hint or f"hero_{i}",
+                        box=box,
+                        path=dist.hole_path,
+                        cheap_label=dist.cheap_label,
+                        cheap_conf=dist.cheap_conf,
+                        cheap_margin=dist.cheap_margin,
+                        enhanced_label=dist.enhanced_label,
+                        enhanced_conf=dist.enhanced_conf,
+                        enhanced_margin=dist.enhanced_margin,
+                    )
                 )
             elif ul_crop is not None:
                 index = ul_crop(crop, 0.55)
