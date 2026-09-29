@@ -63,9 +63,10 @@ def test_board_accepts_clear_high_conf_card():
         "s",
         confidence=0.90,
         rank_margin=0.50,
-        stable_frames=BOARD_MIN_STABLE_FRAMES + 1,
+        stable_frames=BOARD_MIN_STABLE_FRAMES,  # first stable frame is enough
         temporal_agreement=0.80,
     )
+    assert BOARD_MIN_STABLE_FRAMES == 1
     out = accept_table([board])
     assert len(out) == 1
     assert out[0].visibility == VISIBLE

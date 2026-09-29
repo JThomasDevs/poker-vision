@@ -55,9 +55,10 @@ def build_table_state(
 ) -> TableState:
     """Partition observations into hero/board and compute validity metrics.
 
-    ``state_valid`` is True iff both hero cards are VISIBLE with real labels and
-    there is no unresolved board UNKNOWN/TRANSITIONING when board boxes were
-    detected (non-empty board partition, or ``board_detected=True``).
+    ``state_valid`` is True iff both hero cards are VISIBLE with real labels.
+    Unresolved board slots (UNKNOWN/TRANSITIONING) do not invalidate the table;
+    callers should emit only VISIBLE board labels for equity/display.
+    ``board_detected`` is retained for API compatibility and ignored for validity.
     """
     hole_set = set(hole_slots)
     board_set = set(board_slots)
@@ -71,9 +72,6 @@ def build_table_state(
         key=lambda o: _slot_order(o.slot_id, board_slots),
     )
 
-    if board_detected is None:
-        board_detected = len(board) > 0
-
     hero_ok = [
         o
         for o in hero
@@ -82,10 +80,8 @@ def build_table_state(
         and o.label != UNKNOWN_LABEL
         and len(o.label) >= 2
     ]
-    board_unresolved = [o for o in board if o.visibility != VISIBLE]
-    state_valid = len(hero_ok) >= 2 and (
-        (not board_detected) or len(board_unresolved) == 0
-    )
+    # Soft board: hero VISIBLE is enough; unresolved board slots are omitted downstream.
+    state_valid = len(hero_ok) >= 2
 
     visible = [
         o

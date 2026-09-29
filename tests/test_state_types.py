@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from src.state.types import (
+    BOARD_MIN_STABLE_FRAMES,
+    HOLE_MIN_STABLE_FRAMES,
     SLOT_BOARD,
     SLOT_HERO,
     UNKNOWN,
@@ -20,6 +22,11 @@ def test_slot_constants():
     assert SLOT_HERO == ("hero_0", "hero_1")
     assert len(SLOT_BOARD) == 5
     assert SLOT_BOARD[0] == "board_0"
+
+
+def test_acceptance_stable_frame_defaults():
+    assert BOARD_MIN_STABLE_FRAMES == 1
+    assert HOLE_MIN_STABLE_FRAMES == 3
 
 
 def test_normalize_probs_sums_to_one():

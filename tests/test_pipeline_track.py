@@ -94,7 +94,8 @@ def test_build_table_state_valid_when_heroes_visible_no_board():
     assert 0.0 <= table.uncertainty <= 1.0
 
 
-def test_build_table_state_invalid_unresolved_board():
+def test_build_table_state_valid_with_unresolved_board():
+    """Soft board validity: heroes VISIBLE keep state_valid even if board is UNKNOWN."""
     rp, sp = _peaked("A", "s")
     obs = [
         CardObservation(
@@ -128,7 +129,12 @@ def test_build_table_state_invalid_unresolved_board():
         ),
     ]
     table = build_table_state(obs, board_detected=True)
-    assert table.state_valid is False
+    assert table.state_valid is True
+    visible_board = [
+        o for o in table.board if o.visibility == VISIBLE and o.label != UNKNOWN_LABEL
+    ]
+    assert visible_board == []
+    assert table.street == "preflop"
 
 
 def test_apply_tracker_dets_emits_visible_after_stability():
