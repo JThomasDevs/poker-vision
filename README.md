@@ -69,6 +69,10 @@ Adjust in `src/capture/screen.py`:
 - Python 3.9+
 - Stake.us open in browser
 
+## License
+
+Non-commercial use only, with permanent credit required. See [LICENSE](LICENSE).
+
 ## Legal Note
 
 This tool is for personal use at sweepstakes poker sites. Check Stake.us terms of service. Not affiliated with Stake.
