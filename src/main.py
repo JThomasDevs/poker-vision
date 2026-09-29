@@ -35,12 +35,15 @@ class PokerVisionApp:
         villain_range: str = "strong",
         debug_holes: bool = False,
         debug_holes_log: Optional[Path] = None,
+        jev: bool = False,
     ):
         self.capture_interval = capture_interval
         self.confidence_threshold = confidence_threshold
         self.use_debug = use_debug
         self.debug_holes = bool(debug_holes) or _env_flag("POKER_VISION_DEBUG_HOLES")
         self.debug_holes_log = Path(debug_holes_log) if debug_holes_log else None
+        # Two-stage Jev scaffold (validate + decide). Default OFF — offline stubs only.
+        self.jev = bool(jev) or _env_flag("POKER_VISION_JEV")
         self.fast_pipeline = None
         self._last_fast_result = None
         # Equity cache: recompute only when cards change
@@ -92,6 +95,23 @@ class PokerVisionApp:
         print("Perf: equity/classify cached when stable")
         if self.debug_holes:
             print("Hero hole debug: --debug-holes on (per-tick path diagnostics)")
+        if self.jev:
+            print(
+                "Jev decisions: --jev on (offline validate+decide scaffold; "
+                "gated by state_valid — not live RTA)"
+            )
+
+    def _maybe_run_jev(self, table, hand_info) -> None:
+        """Optional Jev validate → decide when --jev and TableState present."""
+        if not self.jev or table is None:
+            return
+        from src.decisions import decide, may_act, validate_state
+
+        vout = validate_state(table)
+        if not (may_act(table, vout) and hand_info):
+            return
+        dout = decide(table, hand_info["result"], validate_out=vout)
+        print(f"Action: {dout.action} (jev conf={dout.confidence:.2f})")
 
     def _maybe_print_hero_diag(self, fast) -> None:
         """Print compact hero-path diag when flag on or holes still incomplete."""
@@ -313,7 +333,12 @@ class PokerVisionApp:
                                 f"Win: {result.win_probability:.1%} | "
                                 f"{result.recommendation}"
                             )
+
+                        table = getattr(fast, "table", None) if fast is not None else None
+                        self._maybe_run_jev(table, hand_info)
                     else:
+                        table = getattr(fast, "table", None) if fast is not None else None
+                        self._maybe_run_jev(table, None)
                         if self.use_console:
                             wait_msg = (
                                 f"blobs={n_blobs} holes=[{_display_labs(hole_labs)}] "
@@ -462,6 +487,14 @@ def main():
         default=None,
         help="Optional path to append hero hole diag lines (with --debug-holes)",
     )
+    parser.add_argument(
+        "--jev",
+        action="store_true",
+        help=(
+            "Enable two-stage Jev validate+decide scaffold (default off; "
+            "offline stubs, gated by TableState.state_valid — not live RTA)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -496,6 +529,7 @@ def main():
         villain_range=args.villain_range,
         debug_holes=bool(args.debug_holes) or _env_flag("POKER_VISION_DEBUG_HOLES"),
         debug_holes_log=args.debug_holes_log,
+        jev=bool(args.jev) or _env_flag("POKER_VISION_JEV"),
     )
 
     app.engine.n_simulations = args.sims

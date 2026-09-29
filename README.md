@@ -27,13 +27,17 @@ poker-vision/
 │       └── README.md    # Dataset instructions
 ├── src/
 │   ├── capture/         # Screen capture
-│   ├── detection/      # YOLO card detection
-│   ├── engine/         # Hand evaluation (eval7)
-│   ├── overlay/        # Display overlay
-│   ├── training/       # Dataset setup & prep
-│   └── main.py         # Main application
+│   ├── detection/       # YOLO / blob+CNN card detection
+│   ├── state/           # CardTrack, accept, authoritative TableState
+│   ├── decisions/       # Two-stage Jev validate + decide (gated, offline stubs)
+│   ├── engine/          # Hand evaluation (treys / Monte Carlo)
+│   ├── overlay/         # Display overlay
+│   ├── training/        # Dataset setup & prep
+│   └── main.py          # Main application
 └── requirements.txt
 ```
+
+**Decisions (optional `--jev`):** Vision → CardTrack/accept → `TableState` (`state_valid`) → soft Jev validate (advisory) → PokerEngine → Jev decide only if `state_valid` and soft OK. Hard invalidity stays in `src/state/`; decide never overrides it. Default off; offline/replay-oriented stubs (not live real-money RTA).
 
 ## Training YOLO Model
 
