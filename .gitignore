@@ -11,10 +11,3 @@ __pycache__/
 # Weights / checkpoints
 *.pt
 yolo*.pt
-
-# Large / local assets (do not commit)
-assets/
-data/cards/by_card/**/*.png
-data/cards/by_card_ul/
-data/cards/models/
-data/**/*.png
